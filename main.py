@@ -23,8 +23,8 @@ def keep_alive():
 keep_alive()
 
 # ---------- Переменные окружения ----------
-TOKEN = os.getenv("BOT_TOKEN")          # Токен бота
-CHAT_ID = os.getenv("CHAT_ID")          # ID канала
+TOKEN = os.getenv("7958310858:AAFPV0y-ZFnkwUUr0l_MIppQqgYDy8iHuJI")          # Токен бота
+CHAT_ID = os.getenv("-1003811886259")          # ID канала
 API_KEY_ALERTS = os.getenv("ALERT_API_KEY")  # Можно оставить пустым для теста
 
 # ---------- Основные переменные ----------
