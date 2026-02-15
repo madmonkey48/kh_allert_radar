@@ -33,6 +33,7 @@ print("✅ Переменные окружения загружены")
 
 # ---------- Основные переменные ----------
 last_alert_start = None
+last_status = False  # False = нет тревоги, True = есть активная тревога
 
 # ---------- Отправка фото ----------
 def send_photo(photo_bytes, caption):
@@ -93,44 +94,66 @@ def generate_map(alerts):
     return output
 
 # ---------- Формирование подписи ----------
-def format_caption(alerts):
+def format_caption(alerts, active):
     now = datetime.utcnow() + timedelta(hours=2)
     now_str = now.strftime("%H:%M")
     types_text = ""
     places_text = []
 
-    for alert in alerts:
-        t = alert.get("type")
-        places = alert.get("places", [])
-        if places:
-            places_text.extend(places)
+    if active:
+        # Активная тревога
+        for alert in alerts:
+            t = alert.get("type")
+            places = alert.get("places", [])
+            if places:
+                places_text.extend(places)
 
-        if t == "air_raid":
-            types_text += "🚨 *Повiтряна тривога - активность боевых петухов*\n"
-        elif t == "artillery":
-            types_text += "💣 *Возможны вылеты петушиной артиллерии*\n"
-        elif t == "rocket":
-            types_text += "🔥 *Ракетная опасность*\n"
-        elif t == "street_fighting":
-            types_text += "🛡️ *Вуличні бої*\n"
-        elif t == "drone":
-            types_text += "🛸 *БПЛА АНАЛоговНет в небе*\n"
-        else:
-            types_text += f"⚠️ *Інша загроза*: {t}\n"
+            if t == "air_raid":
+                types_text += "🚨 *Повiтряна тривога - активность боевых петухов*\n"
+            elif t == "artillery":
+                types_text += "💣 *Возможны вылеты петушиной артиллерии*\n"
+            elif t == "rocket":
+                types_text += "🔥 *Ракетная опасность*\n"
+            elif t == "street_fighting":
+                types_text += "🛡️ *Вуличні бої*\n"
+            elif t == "drone":
+                types_text += "🛸 *БПЛА АНАЛоговНет в небе*\n"
+            else:
+                types_text += f"⚠️ *Інша загроза*: {t}\n"
 
-    caption = f"📍 *Харківська область*\n🕒 {now_str}\n\n{types_text}"
-    if places_text:
-        caption += f"\n🏘 *Локально:* {', '.join(sorted(set(places_text)))}"
-    return caption
+        caption = f"📍 *Харківська область*\n🕒 {now_str}\n\n{types_text}"
+        if places_text:
+            caption += f"\n🏘 *Локально:* {', '.join(sorted(set(places_text)))}"
+        return caption
+    else:
+        # Отбой тревоги
+        duration_text = ""
+        global last_alert_start
+        if last_alert_start:
+            duration = now - last_alert_start
+            minutes = int(duration.total_seconds() // 60)
+            duration_text = f"⏱ *Тривала:* {minutes} хвилин\n"
+        caption = f"✅ *Відбій повітряної тривоги*\n📍 Харківська область\n🕒 {now_str}\n{duration_text}"
+        return caption
 
 # ---------- Основной цикл ----------
 while True:
     alerts = get_alert_status()
-    if alerts:
-        photo = generate_map(alerts)
-        caption = format_caption(alerts)
-        send_photo(photo, caption)
-        last_alert_start = datetime.utcnow() + timedelta(hours=2)
+    current_status = bool(alerts)
+
+    if current_status != last_status:
+        if current_status:
+            # Активная тревога
+            photo = generate_map(alerts)
+            caption = format_caption(alerts, active=True)
+            send_photo(photo, caption)
+            last_alert_start = datetime.utcnow() + timedelta(hours=2)
+        else:
+            # Отбой
+            caption = format_caption([], active=False)
+            send_photo(BytesIO(), caption)  # Пустая картинка для отбоя
+        last_status = current_status
     else:
         print("Нет активных тревог")
+
     time.sleep(60)
