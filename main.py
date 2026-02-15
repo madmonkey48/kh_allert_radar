@@ -2,7 +2,7 @@ import os
 import requests
 from PIL import Image, ImageDraw
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 import time
@@ -23,8 +23,8 @@ def keep_alive():
 keep_alive()
 
 # ---------- Переменные окружения ----------
-TOKEN = os.getenv("7958310858:AAFPV0y-ZFnkwUUr0l_MIppQqgYDy8iHuJI")       # Токен бота
-CHAT_ID = os.getenv("-1003811886259")       # ID канала
+TOKEN = os.getenv("BOT_TOKEN")          # Токен бота
+CHAT_ID = os.getenv("CHAT_ID")          # ID канала
 API_KEY_ALERTS = os.getenv("ALERT_API_KEY")  # Можно оставить пустым для теста
 
 # ---------- Основные переменные ----------
@@ -43,10 +43,9 @@ def send_photo(photo_bytes, caption):
 
 # ---------- Тестовый режим (без API) ----------
 def get_alert_status():
-    # --- Тестовые данные ---
     get_alert_status.counter += 1
+    # Каждые 5 минут "тревога" с локальными районами
     if get_alert_status.counter % 5 == 0:
-        # Каждые 5 минут "тревога" с локальными районами
         return [{"type": "air_raid", "places": ["Салтівка", "ХТЗ"]}]
     return []
 
@@ -74,10 +73,9 @@ def generate_map(alerts):
         base_map = Image.open(BytesIO(response.content)).convert("RGBA")
     except Exception as e:
         print("Ошибка при загрузке карты:", e)
-        base_map = Image.new("RGBA", (800, 600), (0, 255, 0, 255))  # просто зелёный фон
-    
-    draw = ImageDraw.Draw(base_map)
+        base_map = Image.new("RGBA", (800, 600), (0, 255, 0, 255))  # зелёный фон
 
+    draw = ImageDraw.Draw(base_map)
     for alert in alerts:
         places = alert.get("places", [])
         for place in places:
@@ -92,7 +90,8 @@ def generate_map(alerts):
 
 # ---------- Формирование подписи ----------
 def format_caption(alerts):
-    now = datetime.now()
+    # Время с учетом UTC+2 (Киев/Харьков)
+    now = datetime.utcnow() + timedelta(hours=2)
     now_str = now.strftime("%H:%M")
     types_text = ""
     places_text = []
@@ -118,7 +117,7 @@ def format_caption(alerts):
 
     caption = f"📍 *Харківська область*\n🕒 {now_str}\n\n{types_text}"
     if places_text:
-        caption += f"\n🏘 *Локально:* {', '.join(set(places_text))}"
+        caption += f"\n🏘 *Локально:* {', '.join(sorted(set(places_text)))}"
     return caption
 
 # ---------- Основной цикл ----------
@@ -128,6 +127,7 @@ while True:
         photo = generate_map(alerts)
         caption = format_caption(alerts)
         send_photo(photo, caption)
+        last_alert_start = datetime.utcnow() + timedelta(hours=2)
     else:
         print("Нет активных тревог")
     time.sleep(60)
