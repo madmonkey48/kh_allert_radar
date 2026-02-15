@@ -155,16 +155,13 @@ def format_caption(alerts=None, active=True, duration=None):
         caption += types_text
         if places_text:
             caption += f"\n🏘 *Локально:* {', '.join(sorted(set(places_text)))}"
+
     elif not active:
         caption += "✅ *Відбій повітряної тривоги*\n"
-        if alerts:
-            for alert in alerts:
-                t = alert.get("type")
-                caption += f"\n{escape_md(ALERT_ADVICE.get(t, ALERT_ADVICE['default']))}"
-        else:
-            caption += "\nДотримуйтесь загальних правил безпеки, залишайтеся уважними."
         if duration:
             caption += f"\n⏱ Тривала: {duration} хвилин"
+        else:
+            caption += "\nДотримуйтесь загальних правил безпеки, залишайтеся уважними."
 
     return caption
 
