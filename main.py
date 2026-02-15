@@ -23,17 +23,25 @@ def keep_alive():
 keep_alive()
 
 # ---------- Переменные окружения ----------
-TOKEN = os.getenv("BOT_TOKEN", "").strip()       # Токен бота
-CHAT_ID = os.getenv("CHAT_ID", "").strip()       # ID канала
-API_KEY_ALERTS = os.getenv("ALERT_API_KEY", "").strip()  # Пока можно оставить пустым
-
-print("TOKEN CHECK:", repr(TOKEN))
-print("CHAT_ID CHECK:", repr(CHAT_ID))
-print("✅ Переменные окружения загружены")
+TOKEN = os.getenv("BOT_TOKEN", "").strip()          # Токен бота
+CHAT_ID = os.getenv("CHAT_ID", "").strip()          # ID канала
+API_KEY_ALERTS = os.getenv("ALERT_API_KEY", "").strip()  # Ключ API (можно оставить пустым)
 
 # ---------- Основные переменные ----------
 last_alert_start = None
-last_status = False  # False = нет тревоги, True = есть активная тревога
+last_status = None
+daily_alerts = []
+last_daily_report = datetime.now().date()
+
+# ---------- Советы по безопасности ----------
+ALERT_ADVICE = {
+    "air_raid": "🚨 *Повiтряна тривога* — Знайдіть найближче укриття, закрийте вікна, тримайте телефон поруч для оповіщень.",
+    "artillery": "💣 *Артилерійська загроза* — Не перебувайте на відкритих просторах, сховайтеся у будинку, майте під рукою аптечку.",
+    "rocket": "🔥 *Ракетна загроза* — Негайно спускайтеся в підвал або захищене приміщення, не підходьте до вікон.",
+    "street_fighting": "🛡️ *Вуличні бої* — По можливості уникайте вулиць, залишайтеся вдома, повідомляйте про підозрілі переміщення.",
+    "drone": "🛸 *БПЛА* — Не наближайтесь до підозрілих дронів, перебувайте в приміщенні.",
+    "default": "⚠️ *Інша загроза* — Дотримуйтесь загальних правил безпеки, слідкуйте за оновленнями від влади."
+}
 
 # ---------- Отправка фото ----------
 def send_photo(photo_bytes, caption):
@@ -94,66 +102,66 @@ def generate_map(alerts):
     return output
 
 # ---------- Формирование подписи ----------
-def format_caption(alerts, active):
+def format_caption(alerts, active=True, duration=None):
     now = datetime.utcnow() + timedelta(hours=2)
     now_str = now.strftime("%H:%M")
     types_text = ""
     places_text = []
 
-    if active:
-        # Активная тревога
-        for alert in alerts:
-            t = alert.get("type")
-            places = alert.get("places", [])
-            if places:
-                places_text.extend(places)
+    for alert in alerts:
+        t = alert.get("type")
+        places = alert.get("places", [])
+        if places:
+            places_text.extend(places)
 
-            if t == "air_raid":
-                types_text += "🚨 *Повiтряна тривога - активность боевых петухов*\n"
-            elif t == "artillery":
-                types_text += "💣 *Возможны вылеты петушиной артиллерии*\n"
-            elif t == "rocket":
-                types_text += "🔥 *Ракетная опасность*\n"
-            elif t == "street_fighting":
-                types_text += "🛡️ *Вуличні бої*\n"
-            elif t == "drone":
-                types_text += "🛸 *БПЛА АНАЛоговНет в небе*\n"
-            else:
-                types_text += f"⚠️ *Інша загроза*: {t}\n"
+        types_text += ALERT_ADVICE.get(t, ALERT_ADVICE["default"]) + "\n"
 
-        caption = f"📍 *Харківська область*\n🕒 {now_str}\n\n{types_text}"
-        if places_text:
-            caption += f"\n🏘 *Локально:* {', '.join(sorted(set(places_text)))}"
-        return caption
-    else:
-        # Отбой тревоги
-        duration_text = ""
-        global last_alert_start
-        if last_alert_start:
-            duration = now - last_alert_start
-            minutes = int(duration.total_seconds() // 60)
-            duration_text = f"⏱ *Тривала:* {minutes} хвилин\n"
-        caption = f"✅ *Відбій повітряної тривоги*\n📍 Харківська область\n🕒 {now_str}\n{duration_text}"
-        return caption
+    caption = f"📍 *Харківська область*\n🕒 {now_str}\n\n{types_text}"
+    if places_text:
+        caption += f"\n🏘 *Локально:* {', '.join(sorted(set(places_text)))}"
+    if not active and duration:
+        caption += f"\n⏱ Тривала: {duration} хвилин"
+    return caption
 
 # ---------- Основной цикл ----------
 while True:
-    alerts = get_alert_status()
-    current_status = bool(alerts)
+    try:
+        alerts = get_alert_status()
+        current_status = bool(alerts)
 
-    if current_status != last_status:
-        if current_status:
-            # Активная тревога
-            photo = generate_map(alerts)
-            caption = format_caption(alerts, active=True)
-            send_photo(photo, caption)
-            last_alert_start = datetime.utcnow() + timedelta(hours=2)
-        else:
-            # Отбой
-            caption = format_caption([], active=False)
-            send_photo(BytesIO(), caption)  # Пустая картинка для отбоя
-        last_status = current_status
-    else:
-        print("Нет активных тревог")
+        # Первая итерация
+        if last_status is None:
+            last_status = current_status
+
+        # Смена статуса тревоги
+        if current_status != last_status:
+            if current_status:
+                # Активная тревога
+                photo = generate_map(alerts)
+                caption = format_caption(alerts, active=True)
+                send_photo(photo, caption)
+                last_alert_start = datetime.utcnow() + timedelta(hours=2)
+                daily_alerts.append(datetime.utcnow())
+            else:
+                # Отбой тревоги
+                if last_alert_start:
+                    dur = int((datetime.utcnow() + timedelta(hours=2) - last_alert_start).total_seconds() // 60)
+                else:
+                    dur = None
+                caption = format_caption([{"type": "air_raid"}], active=False, duration=dur)
+                photo = generate_map([])  # чистая карта
+                send_photo(photo, caption)
+            last_status = current_status
+
+        # Ежедневный отчет
+        today = (datetime.utcnow() + timedelta(hours=2)).date()
+        if today != last_daily_report:
+            count = len(daily_alerts)
+            send_photo(generate_map([]), f"📊 *Статистика повітряних тривог за день:* {count} тривог")
+            daily_alerts = []
+            last_daily_report = today
+
+    except Exception as e:
+        print("Ошибка в основном цикле:", e)
 
     time.sleep(60)
