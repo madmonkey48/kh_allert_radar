@@ -1,3 +1,4 @@
 requests
 Pillow
 flask
+telethon
