@@ -49,23 +49,15 @@ ALERT_TYPES = {
 }
 
 
-# -------------------------------------------------
-# УНИКАЛЬНЫЕ ТЕКСТЫ СТАРТА
-# -------------------------------------------------
-
 START_MESSAGES = {
-    "air_raid": "🛡 <b>Зафіксовано повітряну небезпеку.</b><br>Негайно прямуйте в укриття.",
-    "rocket": "🚀 <b>Існує ризик ракетного удару.</b><br>Час реагування мінімальний — терміново в укриття.",
-    "drone": "🛸 <b>Зафіксовано активність ударних БПЛА.</b><br>Перебувайте в укритті та обмежте світло.",
-    "artillery_shelling": "💣 <b>Фіксується артилерійська активність.</b><br>Перебувайте в укритті та тримайтесь подалі від вікон.",
-    "urban_fights": "🛡 <b>Повідомляється про бойові дії в межах населених пунктів.</b><br>Уникайте пересування.",
-    "default": "⚠️ <b>Зафіксовано небезпеку.</b><br>Слідкуйте за офіційними повідомленнями."
+    "air_raid": "🛡 <b>Зафіксовано повітряну небезпеку.</b>\nНегайно прямуйте в укриття.",
+    "rocket": "🚀 <b>Існує ризик ракетного удару.</b>\nЧас реагування мінімальний — терміново в укриття.",
+    "drone": "🛸 <b>Зафіксовано активність ударних БПЛА.</b>\nПеребувайте в укритті та обмежте світло.",
+    "artillery_shelling": "💣 <b>Фіксується артилерійська активність.</b>\nПеребувайте в укритті та тримайтесь подалі від вікон.",
+    "urban_fights": "🛡 <b>Повідомляється про бойові дії в межах населених пунктів.</b>\nУникайте пересування.",
+    "default": "⚠️ <b>Зафіксовано небезпеку.</b>\nСлідкуйте за офіційними повідомленнями."
 }
 
-
-# -------------------------------------------------
-# УНИКАЛЬНЫЕ ТЕКСТЫ ОТБОЯ
-# -------------------------------------------------
 
 END_MESSAGES = {
     "air_raid": "🛡 Загроза повітряної атаки минула.",
@@ -86,7 +78,6 @@ current_locations_hash = None
 alert_session_active = False
 last_alert_start = None
 last_reminder_sent = None
-last_state_change = None
 
 RESTART_GRACE_PERIOD = 300
 MIN_ALERT_DURATION = 60
@@ -98,24 +89,39 @@ daily_types = {k: 0 for k in ALERT_TYPES.keys()}
 
 
 # -------------------------------------------------
-# Telegram
+# ЗАЩИЩЁННАЯ отправка в Telegram
 # -------------------------------------------------
 
-def send_message(text, retries=3):
+def send_message(text, retries=5):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
 
-    for _ in range(retries):
+    delay = 2
+
+    for attempt in range(retries):
         try:
-            r = requests.post(url, data=data, timeout=5)
+            r = requests.post(url, data=data, timeout=10)
+
             if r.status_code == 200:
                 logging.info("Telegram message sent")
                 return True
-            else:
-                logging.error(f"Telegram status: {r.status_code} | {r.text}")
-        except Exception as e:
-            logging.error(f"Telegram error: {e}")
-        time.sleep(2)
+
+            # Flood control / сервер Telegram
+            if r.status_code in (429, 500, 502, 503, 504):
+                logging.warning(f"Telegram retry {attempt+1}: {r.status_code}")
+                time.sleep(delay)
+                delay *= 2
+                continue
+
+            logging.error(f"Telegram status: {r.status_code} | {r.text}")
+            return False
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Telegram connection error: {e}")
+            time.sleep(delay)
+            delay *= 2
+
+    logging.error("Telegram send failed after retries")
     return False
 
 
@@ -128,7 +134,7 @@ def get_alerts_struct():
         r = requests.get(
             "https://api.alerts.in.ua/v1/alerts/active.json",
             headers={"Authorization": f"Bearer {ALERTS_TOKEN}"},
-            timeout=5,
+            timeout=10,
         )
 
         if r.status_code != 200:
@@ -137,12 +143,7 @@ def get_alerts_struct():
         data = r.json()
         alerts = data.get("alerts", [])
 
-        result = {
-            "types": [],
-            "cities": set(),
-            "raions": set(),
-            "oblast": False,
-        }
+        result = {"types": [], "cities": set(), "raions": set(), "oblast": False}
 
         for a in alerts:
             if "харків" not in a.get("location_oblast", "").lower():
@@ -185,19 +186,19 @@ def build_start_message(info):
     if info["oblast"]:
         location_block = "📍 <b>Харківська область</b>"
     elif info["raions"]:
-        location_block = "📍 <b>Райони:</b><br>" + "<br>".join(f"• {r}" for r in sorted(info["raions"]))
+        location_block = "📍 <b>Райони:</b>\n" + "\n".join(f"• {r}" for r in sorted(info["raions"]))
     elif info["cities"]:
-        location_block = "📍 <b>Населені пункти:</b><br>" + "<br>".join(f"• {c}" for c in sorted(info["cities"]))
+        location_block = "📍 <b>Населені пункти:</b>\n" + "\n".join(f"• {c}" for c in sorted(info["cities"]))
     else:
         location_block = "📍 <b>Харківська область</b>"
 
     body = START_MESSAGES.get(alert_type, START_MESSAGES["default"])
 
     return (
-        f"{emoji} <b>{title}</b><br><br>"
-        f"{location_block}<br><br>"
-        f"🕒 <code>{time_now}</code><br>"
-        f"━━━━━━━━━━━━<br>"
+        f"{emoji} <b>{title}</b>\n\n"
+        f"{location_block}\n\n"
+        f"🕒 <code>{time_now}</code>\n"
+        f"━━━━━━━━━━━━\n"
         f"{body}"
     )
 
@@ -210,15 +211,14 @@ def build_end_message(duration_min):
     extra = END_MESSAGES.get(alert_type, END_MESSAGES["default"])
 
     msg = (
-        "✅ <b>ВІДБІЙ ТРИВОГИ</b><br><br>"
+        "✅ <b>ВІДБІЙ ТРИВОГИ</b>\n\n"
         f"🕒 <code>{time_now}</code>"
     )
 
     if duration_min:
-        msg += f"<br>⏱ <b>Тривалість:</b> {duration_min} хв"
+        msg += f"\n⏱ <b>Тривалість:</b> {duration_min} хв"
 
-    msg += f"<br><br>{extra}"
-
+    msg += f"\n\n{extra}"
     return msg
 
 
@@ -228,7 +228,7 @@ def build_end_message(duration_min):
 
 def loop():
     global alert_session_active, current_alert_type, current_locations_hash
-    global last_alert_start, last_reminder_sent, last_state_change
+    global last_alert_start, last_reminder_sent
     global daily_alerts_count, daily_duration_total, daily_types
 
     while True:
@@ -246,7 +246,7 @@ def loop():
 
                     if new_type != current_alert_type or locations_hash != current_locations_hash:
                         send_message(
-                            f"🔄 <b>ОНОВЛЕННЯ ЗАГРОЗИ</b><br>"
+                            f"🔄 <b>ОНОВЛЕННЯ ЗАГРОЗИ</b>\n"
                             f"{ALERT_TYPES.get(new_type, ALERT_TYPES['default'])[0]} "
                             f"<b>{ALERT_TYPES.get(new_type, ALERT_TYPES['default'])[1]}</b>"
                         )
@@ -259,7 +259,6 @@ def loop():
                     current_locations_hash = locations_hash
                     last_alert_start = now
                     last_reminder_sent = now
-                    last_state_change = now
 
                     send_message(build_start_message(info))
 
@@ -280,10 +279,9 @@ def loop():
                         current_alert_type = None
                         current_locations_hash = None
 
-            # Напоминание
             if alert_session_active and last_reminder_sent:
                 if (now - last_reminder_sent).total_seconds() >= 900:
-                    send_message("⏰ <b>ТРИВОГА ТРИВАЄ</b><br>Будьте в укритті.")
+                    send_message("⏰ <b>ТРИВОГА ТРИВАЄ</b>\nБудьте в укритті.")
                     last_reminder_sent = now
 
         except Exception as e:
