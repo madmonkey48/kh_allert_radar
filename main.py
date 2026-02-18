@@ -6,14 +6,11 @@ from threading import Thread
 import time
 import logging
 
-# ---------- Логирование ----------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logging.info("=== BOT STARTED ===")
 
-# ---------- Flask ----------
 app = Flask(__name__)
 
-# ---------- ПОДКЛЮЧАЕМ КАРТУ ----------
 from map import map_bp
 app.register_blueprint(map_bp)
 
@@ -23,7 +20,6 @@ def home():
     return "Bot is running"
 
 
-# ---------- Переменные окружения ----------
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 ALERTS_TOKEN = os.getenv("ALERTS_TOKEN", "").strip()
@@ -35,7 +31,6 @@ if not ALERTS_TOKEN:
     raise SystemExit("ALERTS_TOKEN не задан!")
 
 
-# ---------- Типы угроз ----------
 ALERT_TYPES = {
     "air_raid": ("🚨", "ПОВІТРЯНА ТРИВОГА"),
     "rocket": ("🚀", "РАКЕТНА ЗАГРОЗА"),
@@ -46,7 +41,6 @@ ALERT_TYPES = {
 }
 
 
-# ---------- Telegram ----------
 def send_message(text, retries=3):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
@@ -65,8 +59,8 @@ def send_message(text, retries=3):
     return False
 
 
-# ---------- Alerts API (НОВЫЙ ФОРМАТ) ----------
-def get_alerts():
+# ---------- НОВЫЙ ПАРСИНГ С РАЗДЕЛЕНИЕМ ----------
+def get_alerts_struct():
     try:
         r = requests.get(
             "https://api.alerts.in.ua/v1/alerts/active.json",
@@ -74,36 +68,48 @@ def get_alerts():
             timeout=5,
         )
 
-        logging.info(f"Alerts API status: {r.status_code}")
-
         if r.status_code != 200:
-            return []
+            return None
 
         data = r.json()
-        alerts_data = data.get("alerts", [])
+        alerts = data.get("alerts", [])
 
-        alerts = []
+        result = {
+            "types": [],
+            "cities": set(),
+            "raions": set(),
+            "oblast": False,
+        }
 
-        for alert in alerts_data:
-            oblast = alert.get("location_oblast", "").lower()
+        for a in alerts:
+            if "харків" not in a.get("location_oblast", "").lower():
+                continue
 
-            if "харків" in oblast:
-                alerts.append(alert.get("alert_type", "air_raid"))
+            result["types"].append(a.get("alert_type", "air_raid"))
 
-        logging.info(f"Detected alerts: {alerts}")
-        return alerts
+            loc_type = a.get("location_type")
+            title = a.get("location_title")
+
+            if loc_type == "city":
+                result["cities"].add(title)
+            elif loc_type == "raion":
+                result["raions"].add(title)
+            elif loc_type == "oblast":
+                result["oblast"] = True
+
+        return result
 
     except Exception as e:
         logging.error(f"alerts.in.ua error: {e}")
-        return []
+        return None
 
 
 @app.route("/api/alerts")
 def api_alerts():
-    return jsonify({"active": bool(get_alerts())})
+    data = get_alerts_struct()
+    return jsonify({"active": bool(data and data["types"])})
 
 
-# ---------- Состояние ----------
 last_status = None
 last_alert_start = None
 last_daily_report = datetime.now(timezone.utc).date()
@@ -114,14 +120,28 @@ daily_duration_total = 0
 daily_types = {k: 0 for k in ALERT_TYPES.keys()}
 
 
-# ---------- Формирование сообщений ----------
-def build_start_message(alert_type):
+# ---------- ТЕКСТ С РАЗДЕЛЕНИЕМ ----------
+def build_location_text(info):
+    if info["oblast"]:
+        return "📍 Харківська область"
+
+    if info["raions"]:
+        return "📍 Райони:\n" + "\n".join(f"• {r}" for r in sorted(info["raions"]))
+
+    if info["cities"]:
+        return "📍 Міста:\n" + "\n".join(f"• {c}" for c in sorted(info["cities"]))
+
+    return "📍 Харківська область"
+
+
+def build_start_message(info):
+    alert_type = info["types"][0] if info["types"] else "air_raid"
     emoji, title = ALERT_TYPES.get(alert_type, ALERT_TYPES["default"])
     time_now = datetime.now().strftime("%H:%M")
 
     return (
         f"{emoji} *{title}*\n"
-        f"📍 Харківська область\n"
+        f"{build_location_text(info)}\n"
         f"🕒 {time_now}\n\n"
         f"➡️ *Негайно прямуйте в укриття*"
     )
@@ -143,7 +163,7 @@ def build_daily_report():
     if daily_alerts_count == 0:
         return "📊 *За добу тривог не було*"
 
-    avg = int(daily_duration_total / daily_alerts_count) if daily_alerts_count else 0
+    avg = int(daily_duration_total / daily_alerts_count)
 
     report = "📊 *СТАТИСТИКА ЗА ДОБУ*\n\n"
     report += f"🔔 Тривог: {daily_alerts_count}\n"
@@ -158,32 +178,29 @@ def build_daily_report():
     return report
 
 
-# ---------- Основной цикл ----------
 def loop():
     global last_status, last_alert_start, last_daily_report, last_reminder_sent
     global daily_alerts_count, daily_duration_total, daily_types
 
     while True:
         try:
-            alerts = get_alerts()
-            current_status = bool(alerts)
+            info = get_alerts_struct()
+            current_status = bool(info and info["types"])
             now = datetime.now(timezone.utc)
 
             if last_status is None:
-                last_status = current_status
+                last_status = False  # важно для старта во время тревоги
 
             if current_status != last_status:
                 if current_status:
-                    alert_type = alerts[0] if alerts else "air_raid"
-
-                    send_message(build_start_message(alert_type))
+                    send_message(build_start_message(info))
 
                     last_alert_start = now
                     last_reminder_sent = now
 
                     daily_alerts_count += 1
-                    daily_types[alert_type] = daily_types.get(alert_type, 0) + 1
-
+                    for t in info["types"]:
+                        daily_types[t] = daily_types.get(t, 0) + 1
                 else:
                     duration = 0
                     if last_alert_start:
@@ -218,6 +235,5 @@ def loop():
 Thread(target=loop, daemon=True).start()
 
 
-# ---------- Запуск ----------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
