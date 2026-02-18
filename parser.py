@@ -1,182 +1,216 @@
 import os
 import re
+import json
 import asyncio
 import logging
+import hashlib
 from datetime import datetime
 
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import FloodWaitError
 
 from telegram_sender import send_message
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [PARSER] %(levelname)s: %(message)s"
+    format="%(asctime)s [SMART-PARSER] %(levelname)s: %(message)s"
 )
 
-# ==============================
-# ENV ПЕРЕМЕННЫЕ
-# ==============================
+# ================= ENV =================
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_NAME = os.getenv("SESSION_NAME", "parser")
-
-# Каналы для парсинга (через запятую в Railway)
 SOURCE_CHANNELS = os.getenv("SOURCE_CHANNELS", "").split(",")
 
-# ==============================
-# ФИЛЬТР РЕГИОНА
-# ==============================
+STATE_FILE = "parser_state.json"
 
-TARGET_KEYWORDS = [
+# ================= STATE =================
+
+if os.path.exists(STATE_FILE):
+    with open(STATE_FILE, "r") as f:
+        state = json.load(f)
+else:
+    state = {"ids": {}, "hashes": []}
+
+
+def save_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+# ================= SMART REGION =================
+
+KHARKIV_ROOTS = [
     "харків", "харьков",
-    "ізюм", "изюм",
-    "куп'янськ", "купянск",
-    "чуг", "балаклія", "балаклея",
-    "вовчанськ", "волчанск",
+    "дергач", "чуг", "ізюм", "изюм",
+    "купян", "балакл", "вовчан", "волчан",
+    "лозов", "зміїв", "змеев",
+    "богодух", "красноград", "мереф",
+    "пісочин", "песочин", "солониц"
 ]
 
-# ==============================
-# АНАЛИТИКА УГРОЗ
-# ==============================
 
-THREAT_PATTERNS = {
-    "🚀 ПРИЛІТ РАКЕТИ": [
-        r"прил[её]т",
-        r"влучан",
-        r"удар ракет",
-        r"попадан",
-    ],
-    "🛸 ПРИЛІТ БПЛА": [
-        r"прил[её]т.*бпл",
-        r"шахед",
-        r"дрон.*влуч",
-    ],
-    "💥 ВИБУХ": [
-        r"вибух",
-        r"взрыв",
-    ],
-    "🛡 ЗБИТО": [
-        r"збит",
-        r"сбит",
-        r"ппо знищ",
-    ],
-    "📍 ПАДІННЯ УЛАМКІВ": [
-        r"падін",
-        r"падение обломк",
-    ],
-    "💣 АРТИЛЕРІЙСЬКИЙ ОБСТРІЛ": [
-        r"артилер",
-        r"обстр",
-    ],
-    "✈️ КАБ / АВІАУДАР": [
-        r"каб",
-        r"авіаудар",
-        r"авиаудар",
-    ],
-}
+def in_kharkiv(text: str) -> bool:
+    t = text.lower()
 
-# ==============================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ==============================
+    if "харківськ" in t or "харьковск" in t:
+        return True
 
-def contains_target_region(text: str) -> bool:
-    text_lower = text.lower()
-    return any(keyword in text_lower for keyword in TARGET_KEYWORDS)
+    return any(root in t for root in KHARKIV_ROOTS)
 
 
-def detect_threat_type(text: str) -> str:
-    text_lower = text.lower()
+# ================= THREAT PRIORITY =================
 
-    for threat, patterns in THREAT_PATTERNS.items():
-        for pattern in patterns:
-            if re.search(pattern, text_lower):
-                return threat
+THREATS = [
+    ("🚀 ПРИЛІТ РАКЕТИ", [
+        r"прил[её]т", r"влучан", r"ракетн(ий|ый) удар"
+    ]),
+
+    ("💥 ВЛУЧАННЯ / УДАР", [
+        r"попадан", r"пряме влуч"
+    ]),
+
+    ("💣 АРТОБСТРІЛ", [
+        r"артилер", r"обстрел", r"обстріл"
+    ]),
+
+    ("🛸 ПРИЛІТ БПЛА", [
+        r"шахед", r"дрон", r"бпл"
+    ]),
+
+    ("🛡 ЗБИТО ЦІЛЬ", [
+        r"збит", r"сбит", r"ппо знищ"
+    ]),
+
+    ("📍 ПАДІННЯ УЛАМКІВ", [
+        r"уламк", r"обломк", r"падін"
+    ]),
+
+    ("👁 ЦІЛЬ У НЕБІ / РУХ", [
+        r"замечен", r"помічено",
+        r"в небі", r"над міст", r"над город",
+        r"курс на", r"рухаєт", r"движет",
+        r"проліта", r"пролет"
+    ]),
+]
+
+
+def detect_threat(text: str) -> str:
+    t = text.lower()
+
+    for title, patterns in THREATS:
+        for p in patterns:
+            if re.search(p, t):
+                return title
 
     return "⚠️ ОПЕРАТИВНЕ ПОВІДОМЛЕННЯ"
 
 
-def extract_location_line(text: str) -> str:
+# ================= LOCATION =================
+
+def extract_location(text: str) -> str:
     lines = text.split("\n")
+
     for line in lines:
-        if any(word in line.lower() for word in TARGET_KEYWORDS):
+        if in_kharkiv(line):
             return line.strip()
-    return ""
+
+    return "Харківська область"
 
 
-def format_alert_message(threat: str, location: str, original_text: str) -> str:
+# ================= DUPLICATES =================
+
+def text_hash(text: str) -> str:
+    return hashlib.md5(text.encode()).hexdigest()
+
+
+def is_duplicate(channel_id: str, msg_id: str, text: str) -> bool:
+    if channel_id in state["ids"] and msg_id in state["ids"][channel_id]:
+        return True
+
+    h = text_hash(text)
+    if h in state["hashes"]:
+        return True
+
+    return False
+
+
+def save_processed(channel_id: str, msg_id: str, text: str):
+    state["ids"].setdefault(channel_id, []).append(msg_id)
+    state["hashes"].append(text_hash(text))
+
+    state["ids"][channel_id] = state["ids"][channel_id][-200:]
+    state["hashes"] = state["hashes"][-200:]
+
+    save_state()
+
+
+# ================= FORMAT =================
+
+def format_msg(threat: str, location: str, original: str) -> str:
     now = datetime.utcnow().strftime("%H:%M")
 
-    message = f"""
+    return f"""
 ━━━━━━━━━━━━━━
 {threat}
 
-📍 {location if location else "Харківська область"}
-
+📍 {location}
 🕒 {now}
 
 ━━━━━━━━━━━━━━
-{original_text[:300]}
-"""
-
-    return message.strip()
+{original[:400]}
+""".strip()
 
 
-# ==============================
-# TELETHON ЛОГИКА
-# ==============================
+# ================= TELETHON =================
 
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-
-processed_ids = set()
 
 
 @client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
     try:
-        if event.id in processed_ids:
-            return
-
         text = event.raw_text
         if not text:
             return
 
-        if not contains_target_region(text):
+        if not in_kharkiv(text):
             return
 
-        threat = detect_threat_type(text)
-        location = extract_location_line(text)
+        cid = str(event.chat_id)
+        mid = str(event.id)
 
-        formatted = format_alert_message(threat, location, text)
+        if is_duplicate(cid, mid, text):
+            return
 
-        send_message(formatted)
+        threat = detect_threat(text)
+        location = extract_location(text)
 
-        processed_ids.add(event.id)
+        send_message(format_msg(threat, location, text))
+        save_processed(cid, mid, text)
 
-        logging.info(f"Sent alert: {threat}")
+        logging.info(f"SENT: {threat}")
 
     except FloodWaitError as e:
-        logging.warning(f"Flood wait: {e.seconds}")
         await asyncio.sleep(e.seconds)
 
-    except RPCError as e:
-        logging.error(f"Telegram RPC error: {e}")
-
     except Exception as e:
-        logging.error(f"Unexpected error: {e}")
+        logging.error(f"Handler error: {e}")
 
+
+# ================= MAIN LOOP =================
 
 async def main():
     while True:
         try:
             logging.info("Connecting to Telegram...")
             await client.start()
-            logging.info("Parser connected")
+            logging.info("SMART parser started")
             await client.run_until_disconnected()
 
         except Exception as e:
-            logging.error(f"Connection error: {e}")
+            logging.error(f"Reconnect error: {e}")
             await asyncio.sleep(5)
 
 
