@@ -1,10 +1,11 @@
 import os
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from threading import Thread
 import time
 import logging
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logging.info("=== BOT STARTED ===")
@@ -31,12 +32,15 @@ if not ALERTS_TOKEN:
     raise SystemExit("ALERTS_TOKEN не задан!")
 
 
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
+
+
 ALERT_TYPES = {
     "air_raid": ("🚨", "ПОВІТРЯНА ТРИВОГА"),
     "rocket": ("🚀", "РАКЕТНА ЗАГРОЗА"),
     "drone": ("🛸", "ЗАГРОЗА БПЛА"),
     "artillery_shelling": ("💣", "АРТИЛЕРІЙСЬКИЙ ОБСТРІЛ"),
-    "urban_fights": ("🛡️", "ВУЛИЧНІ БОЇ"),
+    "urban_fights": ("🛡", "ВУЛИЧНІ БОЇ"),
     "default": ("⚠️", "НЕБЕЗПЕКА"),
 }
 
@@ -59,7 +63,6 @@ def send_message(text, retries=3):
     return False
 
 
-# ---------- НОВЫЙ ПАРСИНГ С РАЗДЕЛЕНИЕМ ----------
 def get_alerts_struct():
     try:
         r = requests.get(
@@ -112,7 +115,7 @@ def api_alerts():
 
 last_status = None
 last_alert_start = None
-last_daily_report = datetime.now(timezone.utc).date()
+last_daily_report = datetime.now(KYIV_TZ).date()
 last_reminder_sent = None
 
 daily_alerts_count = 0
@@ -120,38 +123,48 @@ daily_duration_total = 0
 daily_types = {k: 0 for k in ALERT_TYPES.keys()}
 
 
-# ---------- ТЕКСТ С РАЗДЕЛЕНИЕМ ----------
-def build_location_text(info):
-    if info["oblast"]:
-        return "📍 Харківська область"
-
-    if info["raions"]:
-        return "📍 Райони:\n" + "\n".join(f"• {r}" for r in sorted(info["raions"]))
-
-    if info["cities"]:
-        return "📍 Міста:\n" + "\n".join(f"• {c}" for c in sorted(info["cities"]))
-
-    return "📍 Харківська область"
-
-
+# ---------- Новый красивый дизайн ----------
 def build_start_message(info):
     alert_type = info["types"][0] if info["types"] else "air_raid"
     emoji, title = ALERT_TYPES.get(alert_type, ALERT_TYPES["default"])
-    time_now = datetime.now().strftime("%H:%M")
+    time_now = datetime.now(KYIV_TZ).strftime("%H:%M")
+
+    # Локации
+    if info["oblast"]:
+        location_block = "📍 Харківська область"
+    elif info["raions"]:
+        location_block = "📍 Райони:\n" + "\n".join(f"• {r}" for r in sorted(info["raions"]))
+    elif info["cities"]:
+        location_block = "📍 Населені пункти:\n" + "\n".join(f"• {c}" for c in sorted(info["cities"]))
+    else:
+        location_block = "📍 Харківська область"
+
+    # Индивидуальные инструкции
+    instructions = {
+        "air_raid": "🛡 Негайно прямуйте в укриття",
+        "rocket": "⏱ Час реагування мінімальний\n🛡 Терміново в укриття",
+        "drone": "🔇 Залишайтесь в укритті\n📵 Обмежте використання світла",
+        "artillery_shelling": "🏠 Перебувайте в укритті\n🚫 Не підходьте до вікон",
+        "urban_fights": "🚷 Уникайте пересування\n🏠 Залишайтесь у безпечному місці",
+        "default": "ℹ️ Слідкуйте за офіційними повідомленнями",
+    }
 
     return (
-        f"{emoji} *{title}*\n"
-        f"{build_location_text(info)}\n"
-        f"🕒 {time_now}\n\n"
-        f"➡️ *Негайно прямуйте в укриття*"
+        f"{emoji} *{title}*\n\n"
+        f"{location_block}\n\n"
+        f"🕒 {time_now}\n"
+        f"━━━━━━━━━━━━\n"
+        f"{instructions.get(alert_type, instructions['default'])}"
     )
 
 
 def build_end_message(duration_min):
-    time_now = datetime.now().strftime("%H:%M")
+    time_now = datetime.now(KYIV_TZ).strftime("%H:%M")
 
-    msg = "✅ *ВІДБІЙ ТРИВОГИ*\n"
-    msg += f"🕒 {time_now}"
+    msg = (
+        "✅ *ВІДБІЙ ТРИВОГИ*\n\n"
+        f"🕒 {time_now}"
+    )
 
     if duration_min:
         msg += f"\n⏱ Тривалість: {duration_min} хв"
@@ -186,21 +199,20 @@ def loop():
         try:
             info = get_alerts_struct()
             current_status = bool(info and info["types"])
-            now = datetime.now(timezone.utc)
+            now = datetime.now(KYIV_TZ)
 
             if last_status is None:
-                last_status = False  # важно для старта во время тревоги
+                last_status = False
 
             if current_status != last_status:
                 if current_status:
                     send_message(build_start_message(info))
-
                     last_alert_start = now
                     last_reminder_sent = now
 
                     daily_alerts_count += 1
                     for t in info["types"]:
-                        daily_types[t] = daily_types.get(t, 0) + 1
+                        daily_types[t] += 1
                 else:
                     duration = 0
                     if last_alert_start:
@@ -216,7 +228,7 @@ def loop():
                     send_message("⏰ *ТРИВОГА ТРИВАЄ*\nБудьте в укритті.")
                     last_reminder_sent = now
 
-            today = (now + timedelta(hours=2)).date()
+            today = now.date()
             if today != last_daily_report:
                 send_message(build_daily_report())
 
