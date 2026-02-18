@@ -13,7 +13,7 @@ logging.info("=== BOT STARTED ===")
 # ---------- Flask ----------
 app = Flask(__name__)
 
-# ---------- ПОДКЛЮЧАЕМ КАРТУ (ВАЖНО) ----------
+# ---------- ПОДКЛЮЧАЕМ КАРТУ ----------
 from map import map_bp
 app.register_blueprint(map_bp)
 
@@ -37,13 +37,65 @@ if not ALERTS_TOKEN:
 
 # ---------- Советы безопасности ----------
 ALERT_ADVICE = {
-    "air_raid": "🚨 *Повітряна тривога* — Знайдіть найближче укриття.",
-    "artillery": "💣 *Артилерійська загроза* — Уникайте відкритих місць.",
-    "rocket": "🔥 *Ракетна загроза* — Негайно прямуйте в укриття.",
-    "drone": "🛸 *БПЛА* — Залишайтесь у приміщенні.",
-    "street_fighting": "🛡️ *Вуличні бої* — Не виходьте на вулицю.",
-    "default": "⚠️ *Небезпека* — Дотримуйтесь правил безпеки."
+    "air_raid": "Знайдіть найближче укриття.",
+    "artillery": "Уникайте відкритих місць.",
+    "rocket": "Негайно прямуйте в укриття.",
+    "drone": "Залишайтесь у приміщенні.",
+    "street_fighting": "Не виходьте на вулицю.",
+    "default": "Дотримуйтесь правил безпеки."
 }
+
+# ---------- Дизайн уведомлений ----------
+ALERT_META = {
+    "air_raid":  {"emoji": "🚨", "title": "ПОВІТРЯНА ТРИВОГА"},
+    "rocket":    {"emoji": "🚀", "title": "РАКЕТНА НЕБЕЗПЕКА"},
+    "artillery": {"emoji": "💣", "title": "АРТИЛЕРІЙСЬКА ЗАГРОЗА"},
+    "drone":     {"emoji": "🛸", "title": "ЗАГРОЗА БПЛА"},
+    "street_fighting": {"emoji": "🛡️", "title": "ВУЛИЧНІ БОЇ"},
+    "default":   {"emoji": "⚠️", "title": "НЕБЕЗПЕКА"},
+}
+
+
+def format_alert_start(alert_type: str, start_time: datetime) -> str:
+    meta = ALERT_META.get(alert_type, ALERT_META["default"])
+    advice = ALERT_ADVICE.get(alert_type, ALERT_ADVICE["default"])
+
+    return (
+        f"{meta['emoji']} *{meta['title']}*\n"
+        f"📍 *Харківська область*\n"
+        f"🕒 Початок: *{start_time.strftime('%H:%M')}*\n\n"
+        f"_{advice}_"
+    )
+
+
+def format_alert_reminder(minutes: int) -> str:
+    return (
+        "⏰ *ТРИВОГА ТРИВАЄ*\n"
+        f"⏱ Вже: *{minutes} хв*\n\n"
+        "Перебувайте в укритті."
+    )
+
+
+def format_alert_end(duration: int | None) -> str:
+    msg = (
+        "✅ *ВІДБІЙ ПОВІТРЯНОЇ ТРИВОГИ*\n"
+        "📍 *Харківська область*"
+    )
+
+    if duration:
+        msg += f"\n⏱ Тривала: *{duration} хв*"
+
+    msg += "\n\nБудьте обережні."
+
+    return msg
+
+
+def format_daily_report(count: int) -> str:
+    return (
+        "📊 *СТАТИСТИКА ЗА ДОБУ*\n"
+        f"🔔 Тривог: *{count}*\n\n"
+        "Бережіть себе."
+    )
 
 
 # ---------- Telegram ----------
@@ -118,8 +170,9 @@ def loop():
             # --- начало / конец тревоги ---
             if current_status != last_status:
                 if current_status:
-                    advice = ALERT_ADVICE.get(alerts[0], ALERT_ADVICE["default"])
-                    send_message(advice)
+                    alert_type = alerts[0] if alerts else "air_raid"
+
+                    send_message(format_alert_start(alert_type, now))
 
                     last_alert_start = now
                     daily_alerts.append(now)
@@ -129,24 +182,21 @@ def loop():
                     if last_alert_start:
                         duration = int((now - last_alert_start).total_seconds() // 60)
 
-                    msg = "✅ *Відбій повітряної тривоги*"
-                    if duration:
-                        msg += f"\n⏱ Тривала: {duration} хв"
-
-                    send_message(msg)
+                    send_message(format_alert_end(duration))
 
                 last_status = current_status
 
             # --- напоминание каждые 15 минут ---
-            if current_status and last_reminder_sent:
+            if current_status and last_alert_start and last_reminder_sent:
                 if (now - last_reminder_sent).total_seconds() >= 900:
-                    send_message("⏰ *Тривога триває*")
+                    minutes = int((now - last_alert_start).total_seconds() // 60)
+                    send_message(format_alert_reminder(minutes))
                     last_reminder_sent = now
 
             # --- суточная статистика ---
             today = (now + timedelta(hours=2)).date()
             if today != last_daily_report:
-                send_message(f"📊 *Тривог за день:* {len(daily_alerts)}")
+                send_message(format_daily_report(len(daily_alerts)))
                 daily_alerts = []
                 last_daily_report = today
 
