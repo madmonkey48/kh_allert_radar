@@ -19,14 +19,15 @@ def get_active_regions():
             return []
 
         data = r.json()
-        regions = data.get("regions", []) if isinstance(data, dict) else data
+        alerts = data.get("alerts", [])
 
-        active = []
-        for region in regions:
-            if isinstance(region, dict) and region.get("activeAlerts"):
-                active.append(region.get("regionName"))
+        active = set()
+        for alert in alerts:
+            oblast = alert.get("location_oblast")
+            if oblast:
+                active.add(oblast)
 
-        return active
+        return list(active)
 
     except Exception:
         return []
