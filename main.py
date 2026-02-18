@@ -8,9 +8,11 @@ from threading import Thread
 import time
 import logging
 
-# ---------- Логирование ----------
-logging.basicConfig(filename='bot.log', level=logging.INFO,
-                    format='%(asctime)s [%(levelname)s] %(message)s')
+# ---------- Логирование в stdout (для Railway) ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
 
 # ---------- Keep Alive ----------
 app = Flask('')
@@ -25,10 +27,12 @@ def run():
 
 
 def keep_alive():
-    Thread(target=run).start()
+    Thread(target=run, daemon=True).start()
 
 
 keep_alive()
+
+logging.info("=== BOT STARTED ===")
 
 # ---------- Переменные окружения ----------
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -53,51 +57,41 @@ last_reminder_sent = None
 
 # ---------- Советы по безопасности ----------
 ALERT_ADVICE = {
-    "air_raid": "🚨 *Повітряна тривога* — Знайдіть найближче укриття, закрийте вікна, тримайте телефон поруч для оповіщень.",
-    "artillery": "💣 *Артилерійська загроза* — Не перебувайте на відкритих просторах, сховайтеся у будинку, майте під рукою аптечку.",
-    "rocket": "🔥 *Ракетна загроза* — Негайно спускайтеся в підвал або захищене приміщення, не підходьте до вікон.",
-    "street_fighting": "🛡️ *Вуличні бої* — По можливості уникайте вулиць, залишайтеся вдома, повідомляйте про підозрілі переміщення.",
-    "drone": "🛸 *БПЛА* — Не наближайтесь до підозрілих дронів, перебувайте в приміщенні.",
-    "default": "⚠️ *Інша загроза* — Дотримуйтесь загальних правил безпеки, слідкуйте за оновленнями від влади."
+    "air_raid": "🚨 Повітряна тривога — Знайдіть найближче укриття.",
+    "artillery": "💣 Артилерійська загроза — Уникайте відкритих місць.",
+    "rocket": "🔥 Ракетна загроза — Негайно спускайтеся в укриття.",
+    "street_fighting": "🛡️ Вуличні бої — Залишайтеся вдома.",
+    "drone": "🛸 БПЛА — Перебувайте в приміщенні.",
+    "default": "⚠️ Інша загроза — Дотримуйтесь правил безпеки."
 }
 
-# ---------- Отправка сообщений ----------
+# ---------- Telegram ----------
 
-def send_message(text, retries=3):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "MarkdownV2"}
-    for attempt in range(retries):
-        try:
-            resp = requests.post(url, data=data, timeout=10)
-            if resp.status_code == 200:
-                logging.info("Сообщение отправлено")
-                return True
-            else:
-                logging.warning(f"Ошибка Telegram: {resp.text}")
-        except Exception as e:
-            logging.error(f"Ошибка при отправке сообщения: {e}")
-        time.sleep(5)
-    return False
+def send_message(text):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": text},
+            timeout=10
+        )
+        logging.info("Message sent")
+    except Exception:
+        logging.exception("Telegram send_message error")
 
 
-def send_photo(photo_bytes, caption, retries=3):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-    files = {"photo": photo_bytes}
-    data = {"chat_id": CHAT_ID, "caption": caption, "parse_mode": "MarkdownV2"}
-    for attempt in range(retries):
-        try:
-            resp = requests.post(url, files=files, data=data, timeout=10)
-            if resp.status_code == 200:
-                logging.info("Фото отправлено")
-                return True
-            else:
-                logging.warning(f"Ошибка Telegram: {resp.text}")
-        except Exception as e:
-            logging.error(f"Ошибка при отправке фото: {e}")
-        time.sleep(5)
-    return False
+def send_photo(photo_bytes, caption):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
+            files={"photo": photo_bytes},
+            data={"chat_id": CHAT_ID, "caption": caption},
+            timeout=10
+        )
+        logging.info("Photo sent")
+    except Exception:
+        logging.exception("Telegram send_photo error")
 
-# ---------- Реальное получение тревог ----------
+# ---------- alerts.in.ua ----------
 
 def get_alert_status():
     url = "https://api.alerts.in.ua/v1/alerts/active.json"
@@ -105,148 +99,109 @@ def get_alert_status():
 
     try:
         resp = requests.get(url, headers=headers, timeout=10)
+        logging.info(f"alerts.in.ua status: {resp.status_code}")
 
         if resp.status_code != 200:
-            logging.warning(f"alerts.in.ua error: {resp.text}")
             return []
 
         data = resp.json()
+        logging.info(f"API regions count: {len(data)}")
+
         alerts = []
 
         for region in data:
-            if region.get("regionName") != "Харківська область":
+            name = region.get("regionName", "")
+
+            if "Хар" not in name:
                 continue
 
             for a in region.get("activeAlerts", []):
                 alerts.append({
                     "type": a.get("type", "air_raid"),
-                    "places": [a.get("locationTitle", "Харківська область")]
+                    "places": [a.get("locationTitle", name)]
                 })
 
+        logging.info(f"Active alerts found: {len(alerts)}")
         return alerts
 
-    except Exception as e:
-        logging.error(f"Ошибка alerts.in.ua: {e}")
+    except Exception:
+        logging.exception("alerts.in.ua request failed")
         return []
 
-# ---------- Координаты ----------
+# ---------- Карта ----------
 COORDS = {
     "Салтівка": (500, 200),
     "ХТЗ": (600, 400),
-    "Центр": (400, 300),
-    "Шевченківський": (380, 280),
-    "Новобаварський": (450, 380),
-    "Комінтернівський": (420, 350),
-    "Московський": (360, 360),
-    "Олексіївка": (480, 220),
-    "Індустріальний": (550, 450),
-    "Основ'янський": (300, 320)
+    "Центр": (400, 300)
 }
 
-# ---------- Генерация карты ----------
 
 def generate_map(alerts):
-    map_url = "https://raid.fly.dev/map.png"
     try:
-        response = requests.get(map_url, timeout=10)
-        base_map = Image.open(BytesIO(response.content)).convert("RGBA")
-    except Exception as e:
-        logging.warning(f"Ошибка при загрузке карты: {e}")
-        base_map = Image.new("RGBA", (800, 600), (0, 255, 0, 255))
+        base_map = Image.new("RGBA", (800, 600), (0, 0, 0, 255))
+        draw = ImageDraw.Draw(base_map)
 
-    draw = ImageDraw.Draw(base_map)
-    for alert in alerts:
-        places = alert.get("places", [])
-        for place in places:
-            if place in COORDS:
-                x, y = COORDS[place]
-                draw.ellipse((x-10, y-10, x+10, y+10), fill=(255, 0, 0, 180))
-
-    output = BytesIO()
-    base_map.save(output, format="PNG")
-    output.seek(0)
-    return output
-
-# ---------- Форматирование подписи ----------
-
-def escape_md(text):
-    special_chars = r"_*[]()~`>#+-=|{}.!"
-    for c in special_chars:
-        text = text.replace(c, f"\\{c}")
-    return text
-
-
-def format_caption(alerts=None, active=True, duration=None):
-    now = datetime.now(timezone.utc) + timedelta(hours=2)
-    now_str = now.strftime("%H:%M")
-    caption = f"📍 *Харківська область*\n🕒 {now_str}\n\n"
-
-    if active and alerts:
-        types_text = ""
-        places_text = []
         for alert in alerts:
-            t = alert.get("type")
-            places = alert.get("places", [])
-            if places:
-                places_text.extend(places)
-            types_text += escape_md(ALERT_ADVICE.get(t, ALERT_ADVICE["default"])) + "\n"
-        caption += types_text
-        if places_text:
-            caption += f"\n🏘 *Локально:* {', '.join(sorted(set(places_text)))}"
+            for place in alert.get("places", []):
+                if place in COORDS:
+                    x, y = COORDS[place]
+                    draw.ellipse((x-10, y-10, x+10, y+10), fill=(255, 0, 0, 180))
 
-    elif not active:
-        caption += "✅ *Відбій повітряної тривоги*\n"
-        if duration:
-            caption += f"\n⏱ Тривала: {duration} хвилин"
-        else:
-            caption += "\nДотримуйтесь загальних правил безпеки, залишайтеся уважними."
+        output = BytesIO()
+        base_map.save(output, format="PNG")
+        output.seek(0)
+        return output
 
-    return caption
+    except Exception:
+        logging.exception("Map generation failed")
+        return None
 
-# ---------- Основной цикл ----------
-while True:
-    try:
-        alerts = get_alert_status()
-        current_status = bool(alerts)
-        now_utc = datetime.now(timezone.utc)
+# ---------- Основной цикл с защитой ----------
 
-        if last_status is None:
-            last_status = current_status
+def main_loop():
+    global last_status, last_alert_start, daily_alerts, last_daily_report, last_alerts_active, last_reminder_sent
 
-        if current_status != last_status:
-            if current_status:
-                photo = generate_map(alerts)
-                caption = format_caption(alerts, active=True)
-                send_photo(photo, caption)
-                last_alert_start = now_utc
-                daily_alerts.append(now_utc)
-                last_alerts_active = alerts.copy()
-                last_reminder_sent = now_utc
-            else:
-                dur = None
-                if last_alert_start:
-                    dur = int((now_utc - last_alert_start).total_seconds() // 60)
-                caption = format_caption(alerts=last_alerts_active, active=False, duration=dur)
-                send_message(caption)
+    error_delay = 5
 
-            last_status = current_status
+    while True:
+        try:
+            logging.info("tick")
 
-        # Напоминание каждые 15 минут
-        if current_status and last_alert_start:
-            if last_reminder_sent is None or (now_utc - last_reminder_sent).total_seconds() >= 15 * 60:
-                caption = format_caption(alerts=alerts, active=True)
-                send_photo(generate_map(alerts), caption)
-                last_reminder_sent = now_utc
+            alerts = get_alert_status()
+            current_status = bool(alerts)
+            now_utc = datetime.now(timezone.utc)
 
-        # Ежедневная статистика
-        today = (now_utc + timedelta(hours=2)).date()
-        if today != last_daily_report:
-            count = len(daily_alerts)
-            send_message(f"📊 *Статистика повітряних тривог за день:* {count} тривог")
-            daily_alerts = []
-            last_daily_report = today
+            if last_status is None:
+                last_status = current_status
 
-    except Exception as e:
-        logging.error(f"Ошибка в основном цикле: {e}")
+            if current_status != last_status:
+                if current_status:
+                    photo = generate_map(alerts)
+                    if photo:
+                        send_photo(photo, "🚨 ТРИВОГА")
+                    last_alert_start = now_utc
+                    daily_alerts.append(now_utc)
+                    last_alerts_active = alerts.copy()
+                    last_reminder_sent = now_utc
+                else:
+                    send_message("✅ Відбій тривоги")
 
-    time.sleep(60)
+                last_status = current_status
+
+            today = (now_utc + timedelta(hours=2)).date()
+            if today != last_daily_report:
+                send_message(f"📊 Тривог за день: {len(daily_alerts)}")
+                daily_alerts = []
+                last_daily_report = today
+
+            error_delay = 5
+            time.sleep(60)
+
+        except Exception:
+            logging.exception("Main loop crash")
+            time.sleep(error_delay)
+            error_delay = min(error_delay * 2, 300)
+
+
+if __name__ == "__main__":
+    main_loop()
