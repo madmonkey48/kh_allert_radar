@@ -19,21 +19,29 @@ app = Flask('')
 def home():
     return "Bot is running"
 
+
 def run():
     app.run(host='0.0.0.0', port=8080)
 
+
 def keep_alive():
     Thread(target=run).start()
+
 
 keep_alive()
 
 # ---------- Переменные окружения ----------
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
+ALERTS_TOKEN = os.getenv("ALERTS_TOKEN", "").strip()
 
 if not TOKEN or not CHAT_ID:
     logging.error("BOT_TOKEN или CHAT_ID не заданы!")
     raise SystemExit("BOT_TOKEN или CHAT_ID не заданы!")
+
+if not ALERTS_TOKEN:
+    logging.error("ALERTS_TOKEN не задан!")
+    raise SystemExit("ALERTS_TOKEN не задан!")
 
 # ---------- Основные переменные ----------
 last_alert_start = None
@@ -54,6 +62,7 @@ ALERT_ADVICE = {
 }
 
 # ---------- Отправка сообщений ----------
+
 def send_message(text, retries=3):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "MarkdownV2"}
@@ -69,6 +78,7 @@ def send_message(text, retries=3):
             logging.error(f"Ошибка при отправке сообщения: {e}")
         time.sleep(5)
     return False
+
 
 def send_photo(photo_bytes, caption, retries=3):
     url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
@@ -87,13 +97,37 @@ def send_photo(photo_bytes, caption, retries=3):
         time.sleep(5)
     return False
 
-# ---------- Тестовый режим ----------
+# ---------- Реальное получение тревог ----------
+
 def get_alert_status():
-    get_alert_status.counter += 1
-    if get_alert_status.counter % 5 == 0:
-        return [{"type": "air_raid", "places": ["Салтівка", "ХТЗ"]}]
-    return []
-get_alert_status.counter = 0
+    url = "https://api.alerts.in.ua/v1/alerts/active.json"
+    headers = {"Authorization": f"Bearer {ALERTS_TOKEN}"}
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+
+        if resp.status_code != 200:
+            logging.warning(f"alerts.in.ua error: {resp.text}")
+            return []
+
+        data = resp.json()
+        alerts = []
+
+        for region in data:
+            if region.get("regionName") != "Харківська область":
+                continue
+
+            for a in region.get("activeAlerts", []):
+                alerts.append({
+                    "type": a.get("type", "air_raid"),
+                    "places": [a.get("locationTitle", "Харківська область")]
+                })
+
+        return alerts
+
+    except Exception as e:
+        logging.error(f"Ошибка alerts.in.ua: {e}")
+        return []
 
 # ---------- Координаты ----------
 COORDS = {
@@ -110,6 +144,7 @@ COORDS = {
 }
 
 # ---------- Генерация карты ----------
+
 def generate_map(alerts):
     map_url = "https://raid.fly.dev/map.png"
     try:
@@ -125,18 +160,21 @@ def generate_map(alerts):
         for place in places:
             if place in COORDS:
                 x, y = COORDS[place]
-                draw.ellipse((x-10, y-10, x+10, y+10), fill=(255,0,0,180))
+                draw.ellipse((x-10, y-10, x+10, y+10), fill=(255, 0, 0, 180))
+
     output = BytesIO()
     base_map.save(output, format="PNG")
     output.seek(0)
     return output
 
 # ---------- Форматирование подписи ----------
+
 def escape_md(text):
     special_chars = r"_*[]()~`>#+-=|{}.!"
     for c in special_chars:
         text = text.replace(c, f"\\{c}")
     return text
+
 
 def format_caption(alerts=None, active=True, duration=None):
     now = datetime.now(timezone.utc) + timedelta(hours=2)
@@ -193,9 +231,9 @@ while True:
 
             last_status = current_status
 
-        # Повторное напоминание каждые 15 минут при длительной тревоге
+        # Напоминание каждые 15 минут
         if current_status and last_alert_start:
-            if last_reminder_sent is None or (now_utc - last_reminder_sent).total_seconds() >= 15*60:
+            if last_reminder_sent is None or (now_utc - last_reminder_sent).total_seconds() >= 15 * 60:
                 caption = format_caption(alerts=alerts, active=True)
                 send_photo(generate_map(alerts), caption)
                 last_reminder_sent = now_utc
