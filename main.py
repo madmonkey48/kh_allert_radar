@@ -6,11 +6,14 @@ from threading import Thread
 import time
 import logging
 
+# ---------- Логирование ----------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logging.info("=== BOT STARTED ===")
 
+# ---------- Flask ----------
 app = Flask(__name__)
 
+# ---------- ПОДКЛЮЧАЕМ КАРТУ ----------
 from map import map_bp
 app.register_blueprint(map_bp)
 
@@ -20,6 +23,7 @@ def home():
     return "Bot is running"
 
 
+# ---------- Переменные окружения ----------
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 ALERTS_TOKEN = os.getenv("ALERTS_TOKEN", "").strip()
@@ -31,25 +35,18 @@ if not ALERTS_TOKEN:
     raise SystemExit("ALERTS_TOKEN не задан!")
 
 
-# ---------- РАСШИРЕННЫЕ ТИПЫ УГРОЗ ----------
+# ---------- Типы угроз ----------
 ALERT_TYPES = {
     "air_raid": ("🚨", "ПОВІТРЯНА ТРИВОГА"),
     "rocket": ("🚀", "РАКЕТНА ЗАГРОЗА"),
-    "missile": ("🚀", "РАКЕТНА АТАКА"),
     "drone": ("🛸", "ЗАГРОЗА БПЛА"),
-    "aircraft": ("✈️", "ЗАГРОЗА АВІАЦІЇ"),
-    "artillery": ("💣", "АРТИЛЕРІЙСЬКА НЕБЕЗПЕКА"),
-    "tank": ("🪖", "ЗАГРОЗА БРОНЕТЕХНІКИ"),
-    "street_fighting": ("🛡️", "ВУЛИЧНІ БОЇ"),
-    "naval": ("🚢", "ЗАГРОЗА З МОРЯ"),
-    "explosion": ("💥", "ПОВІДОМЛЕННЯ ПРО ВИБУХИ"),
-    "chemical": ("☣️", "ХІМІЧНА НЕБЕЗПЕКА"),
-    "radiation": ("☢️", "РАДІАЦІЙНА НЕБЕЗПЕКА"),
-    "unknown": ("⚠️", "НЕВІДОМА ЗАГРОЗА"),
+    "artillery_shelling": ("💣", "АРТИЛЕРІЙСЬКИЙ ОБСТРІЛ"),
+    "urban_fights": ("🛡️", "ВУЛИЧНІ БОЇ"),
     "default": ("⚠️", "НЕБЕЗПЕКА"),
 }
 
 
+# ---------- Telegram ----------
 def send_message(text, retries=3):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
@@ -68,6 +65,7 @@ def send_message(text, retries=3):
     return False
 
 
+# ---------- Alerts API (НОВЫЙ ФОРМАТ) ----------
 def get_alerts():
     try:
         r = requests.get(
@@ -82,19 +80,15 @@ def get_alerts():
             return []
 
         data = r.json()
-        regions = data.get("regions", []) if isinstance(data, dict) else data
+        alerts_data = data.get("alerts", [])
 
         alerts = []
 
-        for region in regions:
-            if not isinstance(region, dict):
-                continue
+        for alert in alerts_data:
+            oblast = alert.get("location_oblast", "").lower()
 
-            name = region.get("regionName", "").lower()
-
-            if "харків" in name:
-                for a in region.get("activeAlerts", []):
-                    alerts.append(a.get("type", "air_raid"))
+            if "харків" in oblast:
+                alerts.append(alert.get("alert_type", "air_raid"))
 
         logging.info(f"Detected alerts: {alerts}")
         return alerts
@@ -109,6 +103,7 @@ def api_alerts():
     return jsonify({"active": bool(get_alerts())})
 
 
+# ---------- Состояние ----------
 last_status = None
 last_alert_start = None
 last_daily_report = datetime.now(timezone.utc).date()
@@ -119,6 +114,7 @@ daily_duration_total = 0
 daily_types = {k: 0 for k in ALERT_TYPES.keys()}
 
 
+# ---------- Формирование сообщений ----------
 def build_start_message(alert_type):
     emoji, title = ALERT_TYPES.get(alert_type, ALERT_TYPES["default"])
     time_now = datetime.now().strftime("%H:%M")
@@ -162,6 +158,7 @@ def build_daily_report():
     return report
 
 
+# ---------- Основной цикл ----------
 def loop():
     global last_status, last_alert_start, last_daily_report, last_reminder_sent
     global daily_alerts_count, daily_duration_total, daily_types
@@ -221,5 +218,6 @@ def loop():
 Thread(target=loop, daemon=True).start()
 
 
+# ---------- Запуск ----------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
