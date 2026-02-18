@@ -152,11 +152,12 @@ def loop():
         time.sleep(60)
 
 
-Thread(target=loop, daemon=True).start()
-
-
 # ---------- Подключаем карту ПОСЛЕ создания app ----------
-import map  # noqa: E402
+import map  # важно: до запуска потока
+
+
+# ---------- Запуск фонового цикла ----------
+Thread(target=loop, daemon=True).start()
 
 
 if __name__ == "__main__":
