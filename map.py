@@ -1,10 +1,11 @@
-# === UPGRADE: Ukraine interactive alert map with animation ===
+# === Ukraine regions GeoJSON alert map with daily chart ===
 
-from flask import Flask, jsonify, render_template_string
-import requests, os, threading, time
+from flask import jsonify, render_template_string
+import requests, os
 from datetime import datetime, timezone
 
-app = Flask(__name__)
+# Flask app импортируется из main.py
+from main import app
 
 ALERTS_TOKEN = os.getenv("ALERTS_TOKEN", "")
 
@@ -17,6 +18,7 @@ def get_alert_regions():
             headers={"Authorization": f"Bearer {ALERTS_TOKEN}"},
             timeout=10,
         )
+
         if r.status_code != 200:
             return []
 
@@ -29,16 +31,46 @@ def get_alert_regions():
                 active.append(region.get("regionName"))
 
         return active
+
     except Exception:
         return []
 
 
+# простая in-memory статистика тревог за день
+DAILY_HISTORY = []
+LAST_STATE = False
+
+
+def update_daily_history(active_now: bool):
+    global LAST_STATE
+
+    if active_now and not LAST_STATE:
+        DAILY_HISTORY.append(datetime.now(timezone.utc))
+
+    LAST_STATE = active_now
+
+
 @app.route("/api/alerts")
 def api_alerts():
-    return jsonify({"active": get_alert_regions(), "time": datetime.now(timezone.utc).isoformat()})
+    active = get_alert_regions()
+
+    update_daily_history(len(active) > 0)
+
+    today = datetime.now(timezone.utc).date()
+
+    today_events = [
+        t for t in DAILY_HISTORY
+        if t.date() == today
+    ]
+
+    return jsonify({
+        "active": active,
+        "time": datetime.now(timezone.utc).isoformat(),
+        "count_today": len(today_events)
+    })
 
 
-# ---------- Animated map page ----------
+# ---------- Map HTML with GeoJSON + chart ----------
 
 MAP_HTML = """
 <!DOCTYPE html>
@@ -49,32 +81,11 @@ MAP_HTML = """
 <title>Ukraine Alerts Map</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-html, body { margin:0; height:100%; background:#0b0f1a; }
-#map { height:100%; }
-
-.pulse {
-  background: rgba(255,0,0,0.7);
-  border-radius: 50%;
-  width: 20px;
-  height: 20px;
-  position: relative;
-}
-
-.pulse::after {
-  content: '';
-  position: absolute;
-  left: -10px; top: -10px;
-  width: 40px; height: 40px;
-  border-radius: 50%;
-  background: rgba(255,0,0,0.4);
-  animation: pulse 1.5s infinite;
-}
-
-@keyframes pulse {
-  0% { transform: scale(0.5); opacity: 1; }
-  100% { transform: scale(1.5); opacity: 0; }
-}
+html, body { margin:0; height:100%; background:#0b0f1a; color:white; }
+#map { height:70%; }
+#panel { height:30%; padding:10px; background:#111827; }
 
 .siren {
   position: fixed;
@@ -93,6 +104,9 @@ html, body { margin:0; height:100%; background:#0b0f1a; }
 </head>
 <body>
 <div id="map"></div>
+<div id="panel">
+  <canvas id="chart"></canvas>
+</div>
 <div id="siren" class="siren" style="display:none">🚨 AIR RAID ALERT 🚨</div>
 
 <script>
@@ -102,28 +116,63 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap'
 }).addTo(map);
 
-let markers = [];
+let geoLayer = null;
+let chart = null;
+
+function updateChart(count) {
+  const ctx = document.getElementById('chart');
+
+  if (!chart) {
+    chart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: ['Today'],
+        datasets: [{
+          label: 'Air raid alerts',
+          data: [count]
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } }
+      }
+    });
+  } else {
+    chart.data.datasets[0].data = [count];
+    chart.update();
+  }
+}
 
 async function loadAlerts() {
-  const r = await fetch('/api/alerts');
-  const data = await r.json();
+  const alertsResp = await fetch('/api/alerts');
+  const alertsData = await alertsResp.json();
 
-  markers.forEach(m => map.removeLayer(m));
-  markers = [];
+  const geoResp = await fetch('https://raw.githubusercontent.com/alexkulaga/ukraine-geojson/master/regions.geojson');
+  const geo = await geoResp.json();
 
-  if (data.active.length > 0) {
-    document.getElementById('siren').style.display = 'block';
-  } else {
-    document.getElementById('siren').style.display = 'none';
-  }
+  if (geoLayer) map.removeLayer(geoLayer);
 
-  data.active.forEach(name => {
-    const marker = L.marker([48.5 + Math.random(), 31 + Math.random()], {
-      icon: L.divIcon({ className: 'pulse' })
-    }).addTo(map).bindPopup(name);
+  geoLayer = L.geoJSON(geo, {
+    style: function(feature) {
+      const name = feature.properties.name;
+      const active = alertsData.active.includes(name);
 
-    markers.push(marker);
-  });
+      return {
+        color: active ? '#ff3b3b' : '#3a4a6a',
+        weight: active ? 2 : 1,
+        fillColor: active ? '#ff0000' : '#1b2538',
+        fillOpacity: active ? 0.6 : 0.2
+      };
+    },
+    onEachFeature: function(feature, layer) {
+      layer.bindPopup(feature.properties.name);
+    }
+  }).addTo(map);
+
+  document.getElementById('siren').style.display =
+    alertsData.active.length > 0 ? 'block' : 'none';
+
+  updateChart(alertsData.count_today);
 }
 
 setInterval(loadAlerts, 5000);
