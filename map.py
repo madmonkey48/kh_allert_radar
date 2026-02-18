@@ -1,73 +1,9 @@
 # === Ukraine regions GeoJSON alert map with daily chart ===
 
-from flask import jsonify, render_template_string
-import requests, os
-from datetime import datetime, timezone
+from flask import render_template_string
 
 # Flask app импортируется из main.py
 from main import app
-
-ALERTS_TOKEN = os.getenv("ALERTS_TOKEN", "")
-
-# ---------- Alerts API ----------
-
-def get_alert_regions():
-    try:
-        r = requests.get(
-            "https://api.alerts.in.ua/v1/alerts/active.json",
-            headers={"Authorization": f"Bearer {ALERTS_TOKEN}"},
-            timeout=10,
-        )
-
-        if r.status_code != 200:
-            return []
-
-        data = r.json()
-        regions = data.get("regions", []) if isinstance(data, dict) else data
-
-        active = []
-        for region in regions:
-            if isinstance(region, dict) and region.get("activeAlerts"):
-                active.append(region.get("regionName"))
-
-        return active
-
-    except Exception:
-        return []
-
-
-# простая in-memory статистика тревог за день
-DAILY_HISTORY = []
-LAST_STATE = False
-
-
-def update_daily_history(active_now: bool):
-    global LAST_STATE
-
-    if active_now and not LAST_STATE:
-        DAILY_HISTORY.append(datetime.now(timezone.utc))
-
-    LAST_STATE = active_now
-
-
-@app.route("/api/alerts")
-def api_alerts():
-    active = get_alert_regions()
-
-    update_daily_history(len(active) > 0)
-
-    today = datetime.now(timezone.utc).date()
-
-    today_events = [
-        t for t in DAILY_HISTORY
-        if t.date() == today
-    ]
-
-    return jsonify({
-        "active": active,
-        "time": datetime.now(timezone.utc).isoformat(),
-        "count_today": len(today_events)
-    })
 
 
 # ---------- Map HTML with GeoJSON + chart ----------
