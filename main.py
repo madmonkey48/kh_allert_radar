@@ -1,86 +1,22 @@
-import map
 import os
 import requests
 from datetime import datetime, timedelta, timezone
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify
 from threading import Thread
 import time
 import logging
 
 # ---------- Логирование ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logging.info("=== BOT STARTED ===")
 
 # ---------- Flask ----------
 app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
     return "Bot is running"
 
-# ---------- HTML карта ----------
-MAP_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>Air Alerts Map</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-<style>
-  body { margin: 0; }
-  #map { height: 100vh; }
-</style>
-</head>
-<body>
-<div id="map"></div>
-
-<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-<script>
-const map = L.map('map').setView([49.9935, 36.2304], 10);
-
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© OpenStreetMap'
-}).addTo(map);
-
-let marker = null;
-
-async function updateAlerts() {
-  try {
-    const res = await fetch('/api/alerts');
-    const data = await res.json();
-
-    if (data.active) {
-      if (!marker) {
-        marker = L.circle([49.9935, 36.2304], {
-          radius: 20000
-        }).addTo(map);
-      }
-    } else {
-      if (marker) {
-        map.removeLayer(marker);
-        marker = null;
-      }
-    }
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-setInterval(updateAlerts, 5000);
-updateAlerts();
-</script>
-</body>
-</html>
-"""
-
-@app.route('/map')
-def map_page():
-    return render_template_string(MAP_HTML)
 
 # ---------- Переменные окружения ----------
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -88,53 +24,58 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 ALERTS_TOKEN = os.getenv("ALERTS_TOKEN", "").strip()
 
 if not TOKEN or not CHAT_ID:
-    logging.error("BOT_TOKEN или CHAT_ID не заданы!")
     raise SystemExit("BOT_TOKEN или CHAT_ID не заданы!")
 
 if not ALERTS_TOKEN:
-    logging.error("ALERTS_TOKEN не задан!")
     raise SystemExit("ALERTS_TOKEN не задан!")
 
-# ---------- Telegram ----------
 
+# ---------- Советы безопасности ----------
+ALERT_ADVICE = {
+    "air_raid": "🚨 *Повітряна тривога* — Знайдіть найближче укриття.",
+    "artillery": "💣 *Артилерійська загроза* — Уникайте відкритих місць.",
+    "rocket": "🔥 *Ракетна загроза* — Негайно прямуйте в укриття.",
+    "drone": "🛸 *БПЛА* — Залишайтесь у приміщенні.",
+    "street_fighting": "🛡️ *Вуличні бої* — Не виходьте на вулицю.",
+    "default": "⚠️ *Небезпека* — Дотримуйтесь правил безпеки."
+}
+
+
+# ---------- Telegram ----------
 def send_message(text, retries=3):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "MarkdownV2"}
+    data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
 
     for _ in range(retries):
         try:
-            resp = requests.post(url, data=data, timeout=10)
-            if resp.status_code == 200:
+            if requests.post(url, data=data, timeout=10).status_code == 200:
                 return True
         except Exception as e:
             logging.error(f"Telegram error: {e}")
         time.sleep(5)
-
     return False
 
+
 # ---------- Alerts API ----------
-
-def get_alert_status():
-    url = "https://api.alerts.in.ua/v1/alerts/active.json"
-    headers = {"Authorization": f"Bearer {ALERTS_TOKEN}"}
-
+def get_alerts():
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code != 200:
+        r = requests.get(
+            "https://api.alerts.in.ua/v1/alerts/active.json",
+            headers={"Authorization": f"Bearer {ALERTS_TOKEN}"},
+            timeout=10,
+        )
+
+        if r.status_code != 200:
             return []
 
-        data = resp.json()
+        data = r.json()
         regions = data.get("regions", []) if isinstance(data, dict) else data
 
         alerts = []
         for region in regions:
-            if not isinstance(region, dict):
-                continue
-            if region.get("regionName") != "Харківська область":
-                continue
-
-            for a in region.get("activeAlerts", []):
-                alerts.append(a)
+            if isinstance(region, dict) and region.get("regionName") == "Харківська область":
+                for a in region.get("activeAlerts", []):
+                    alerts.append(a.get("type", "air_raid"))
 
         return alerts
 
@@ -142,10 +83,12 @@ def get_alert_status():
         logging.error(f"alerts.in.ua error: {e}")
         return []
 
-@app.route('/api/alerts')
+
+@app.route("/api/alerts")
 def api_alerts():
-    alerts = get_alert_status()
-    return jsonify({"active": bool(alerts)})
+    """Используется картой"""
+    return jsonify({"active": bool(get_alerts())})
+
 
 # ---------- Основная логика ----------
 last_status = None
@@ -160,23 +103,26 @@ def loop():
 
     while True:
         try:
-            alerts = get_alert_status()
+            alerts = get_alerts()
             current_status = bool(alerts)
-            now_utc = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
 
             if last_status is None:
                 last_status = current_status
 
+            # --- начало / конец тревоги ---
             if current_status != last_status:
                 if current_status:
-                    send_message("🚨 *Повітряна тривога у Харківській області*")
-                    last_alert_start = now_utc
-                    daily_alerts.append(now_utc)
-                    last_reminder_sent = now_utc
+                    advice = ALERT_ADVICE.get(alerts[0], ALERT_ADVICE["default"])
+                    send_message(advice)
+
+                    last_alert_start = now
+                    daily_alerts.append(now)
+                    last_reminder_sent = now
                 else:
                     duration = None
                     if last_alert_start:
-                        duration = int((now_utc - last_alert_start).total_seconds() // 60)
+                        duration = int((now - last_alert_start).total_seconds() // 60)
 
                     msg = "✅ *Відбій повітряної тривоги*"
                     if duration:
@@ -186,14 +132,14 @@ def loop():
 
                 last_status = current_status
 
-            # Напоминание каждые 15 минут
+            # --- напоминание каждые 15 минут ---
             if current_status and last_reminder_sent:
-                if (now_utc - last_reminder_sent).total_seconds() >= 900:
+                if (now - last_reminder_sent).total_seconds() >= 900:
                     send_message("⏰ *Тривога триває*")
-                    last_reminder_sent = now_utc
+                    last_reminder_sent = now
 
-            # Суточная статистика
-            today = (now_utc + timedelta(hours=2)).date()
+            # --- суточная статистика ---
+            today = (now + timedelta(hours=2)).date()
             if today != last_daily_report:
                 send_message(f"📊 *Тривог за день:* {len(daily_alerts)}")
                 daily_alerts = []
@@ -208,5 +154,10 @@ def loop():
 
 Thread(target=loop, daemon=True).start()
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+
+# ---------- Подключаем карту ПОСЛЕ создания app ----------
+import map  # noqa: E402
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
