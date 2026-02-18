@@ -13,6 +13,11 @@ logging.info("=== BOT STARTED ===")
 # ---------- Flask ----------
 app = Flask(__name__)
 
+# ---------- ПОДКЛЮЧАЕМ КАРТУ (ВАЖНО) ----------
+from map import map_bp
+app.register_blueprint(map_bp)
+
+
 @app.route("/")
 def home():
     return "Bot is running"
@@ -152,13 +157,9 @@ def loop():
         time.sleep(60)
 
 
-# ---------- Подключаем карту ПОСЛЕ создания app ----------
-import map  # важно: до запуска потока
-
-
-# ---------- Запуск фонового цикла ----------
 Thread(target=loop, daemon=True).start()
 
 
+# ---------- Запуск ----------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
