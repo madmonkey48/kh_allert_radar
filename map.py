@@ -1,16 +1,12 @@
-# === FINAL: Ukraine animated alert map ===
-
-from flask import render_template_string, jsonify
+from flask import Blueprint, render_template_string, jsonify
 import requests, os
 from datetime import datetime, timezone
 
-# импорт Flask-приложения из main.py
-from main import app
+map_bp = Blueprint("map", __name__)
 
 ALERTS_TOKEN = os.getenv("ALERTS_TOKEN", "")
 
 
-# ---------- Получение активных областей ----------
 def get_active_regions():
     try:
         r = requests.get(
@@ -36,8 +32,7 @@ def get_active_regions():
         return []
 
 
-# ---------- API для карты (ОТДЕЛЬНЫЙ путь!) ----------
-@app.route("/api/map/alerts")
+@map_bp.route("/api/map/alerts")
 def api_map_alerts():
     return jsonify({
         "active": get_active_regions(),
@@ -45,7 +40,6 @@ def api_map_alerts():
     })
 
 
-# ---------- HTML карты ----------
 MAP_HTML = """
 <!DOCTYPE html>
 <html>
@@ -58,16 +52,9 @@ MAP_HTML = """
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <style>
-html, body {
-  margin:0;
-  height:100%;
-  background:#0b0f1a;
-  color:white;
-}
-
+html, body { margin:0; height:100%; background:#0b0f1a; }
 #map { height:100%; }
 
-/* Сирена */
 .siren {
   position: fixed;
   top: 20px;
@@ -84,15 +71,14 @@ html, body {
   50% { opacity:0.2 }
 }
 
-/* Пульсация области */
 .leaflet-interactive.alert-active {
   animation: pulse 1.5s infinite;
 }
 
 @keyframes pulse {
-  0%   { fill-opacity: 0.7; }
-  50%  { fill-opacity: 1; }
-  100% { fill-opacity: 0.7; }
+  0% { fill-opacity:0.7; }
+  50% { fill-opacity:1; }
+  100% { fill-opacity:0.7; }
 }
 </style>
 </head>
@@ -105,14 +91,10 @@ html, body {
 <script>
 const map = L.map('map').setView([48.5, 31], 6);
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© OpenStreetMap'
-}).addTo(map);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
 let geoLayer = null;
 
-
-// ---------- Загрузка тревог ----------
 async function loadAlerts() {
   const alertsResp = await fetch('/api/map/alerts');
   const alertsData = await alertsResp.json();
@@ -136,19 +118,13 @@ async function loadAlerts() {
         fillOpacity: active ? 0.8 : 0.2,
         className: active ? 'alert-active' : ''
       };
-    },
-    onEachFeature: function(feature, layer) {
-      layer.bindPopup(feature.properties.name);
     }
   }).addTo(map);
 
-  // сирена сверху
   document.getElementById('siren').style.display =
     alertsData.active.length > 0 ? 'block' : 'none';
 }
 
-
-// обновление каждые 5 секунд
 setInterval(loadAlerts, 5000);
 loadAlerts();
 </script>
@@ -158,7 +134,6 @@ loadAlerts();
 """
 
 
-# ---------- Страница карты ----------
-@app.route("/map")
+@map_bp.route("/map")
 def map_page():
     return render_template_string(MAP_HTML)
