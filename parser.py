@@ -1,222 +1,183 @@
-import asyncio
+import os
 import re
-import time
+import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError, RPCError
 
-from main import send_message  # используем твою функцию отправки
+from telegram_sender import send_message
 
-# ================== НАСТРОЙКИ ==================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [PARSER] %(levelname)s: %(message)s"
+)
 
-API_ID = 34119509          # <-- вставь
-API_HASH = "4c4a74be703bc8c7a3bb3cb34d608bb8"   # <-- вставь
-SESSION = "parser_session"
+# ==============================
+# ENV ПЕРЕМЕННЫЕ
+# ==============================
 
-CHANNELS = [
-    "cxidua",
-    "tlknewsua",
-    "radar_kharkov",
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+SESSION_NAME = os.getenv("SESSION_NAME", "parser")
+
+# Каналы для парсинга (через запятую в Railway)
+SOURCE_CHANNELS = os.getenv("SOURCE_CHANNELS", "").split(",")
+
+# ==============================
+# ФИЛЬТР РЕГИОНА
+# ==============================
+
+TARGET_KEYWORDS = [
+    "харків", "харьков",
+    "ізюм", "изюм",
+    "куп'янськ", "купянск",
+    "чуг", "балаклія", "балаклея",
+    "вовчанськ", "волчанск",
 ]
 
-# антиспам
-DUPLICATE_TIMEOUT = 300        # 5 минут
-PRIORITY_RESET_TIME = 20 * 60  # сброс приоритета через 20 минут
+# ==============================
+# АНАЛИТИКА УГРОЗ
+# ==============================
 
-# ================== ЛОГИ ==================
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-# ================== ПРИОРИТЕТЫ УГРОЗ ==================
-
-THREAT_PRIORITY = {
-    "rocket": 5,
-    "missile": 5,
-    "iskander": 5,
-    "kalibr": 5,
-
-    "aviation": 4,
-    "mig": 4,
-    "tu": 4,
-
-    "drone": 3,
-    "shahed": 3,
-    "uav": 3,
-
-    "explosion": 2,
-    "arrival": 2,
-
-    "other": 1,
+THREAT_PATTERNS = {
+    "🚀 ПРИЛІТ РАКЕТИ": [
+        r"прил[её]т",
+        r"влучан",
+        r"удар ракет",
+        r"попадан",
+    ],
+    "🛸 ПРИЛІТ БПЛА": [
+        r"прил[её]т.*бпл",
+        r"шахед",
+        r"дрон.*влуч",
+    ],
+    "💥 ВИБУХ": [
+        r"вибух",
+        r"взрыв",
+    ],
+    "🛡 ЗБИТО": [
+        r"збит",
+        r"сбит",
+        r"ппо знищ",
+    ],
+    "📍 ПАДІННЯ УЛАМКІВ": [
+        r"падін",
+        r"падение обломк",
+    ],
+    "💣 АРТИЛЕРІЙСЬКИЙ ОБСТРІЛ": [
+        r"артилер",
+        r"обстр",
+    ],
+    "✈️ КАБ / АВІАУДАР": [
+        r"каб",
+        r"авіаудар",
+        r"авиаудар",
+    ],
 }
 
-last_priority_sent = 0
-last_priority_time = 0
+# ==============================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==============================
 
-# ================== КЛЮЧЕВЫЕ СЛОВА ==================
-
-THREAT_KEYWORDS = {
-    "rocket": ["ракета", "missile", "калібр", "искандер"],
-    "drone": ["бпла", "дрон", "shahed", "шахед"],
-    "aviation": ["авіація", "авиация", "миг", "ту-"],
-    "explosion": ["вибух", "взрыв", "приліт", "прилет"],
-}
-
-DISTRICTS = [
-    "центр",
-    "салтівка",
-    "павлове поле",
-    "олексіївка",
-    "хтз",
-    "нові будинки",
-]
-
-DIRECTIONS = [
-    "з півночі",
-    "з півдня",
-    "зі сходу",
-    "з заходу",
-]
-
-# ================== АНТИДУБЛИКАТ ==================
-
-recent_messages = {}
+def contains_target_region(text: str) -> bool:
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in TARGET_KEYWORDS)
 
 
-def is_duplicate(text: str) -> bool:
-    now = time.time()
+def detect_threat_type(text: str) -> str:
+    text_lower = text.lower()
 
-    for msg, t in list(recent_messages.items()):
-        if now - t > DUPLICATE_TIMEOUT:
-            del recent_messages[msg]
-
-    if text in recent_messages:
-        return True
-
-    recent_messages[text] = now
-    return False
-
-
-# ================== ОПРЕДЕЛЕНИЕ УГРОЗЫ ==================
-
-def detect_threat(text: str) -> str:
-    t = text.lower()
-
-    for threat, words in THREAT_KEYWORDS.items():
-        for w in words:
-            if w in t:
+    for threat, patterns in THREAT_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(pattern, text_lower):
                 return threat
 
-    return "other"
+    return "⚠️ ОПЕРАТИВНЕ ПОВІДОМЛЕННЯ"
 
 
-def detect_district(text: str) -> str | None:
-    t = text.lower()
-    for d in DISTRICTS:
-        if d in t:
-            return d.title()
-    return None
+def extract_location_line(text: str) -> str:
+    lines = text.split("\n")
+    for line in lines:
+        if any(word in line.lower() for word in TARGET_KEYWORDS):
+            return line.strip()
+    return ""
 
 
-def detect_direction(text: str) -> str | None:
-    t = text.lower()
-    for d in DIRECTIONS:
-        if d in t:
-            return d
-    return None
+def format_alert_message(threat: str, location: str, original_text: str) -> str:
+    now = datetime.utcnow().strftime("%H:%M")
+
+    message = f"""
+━━━━━━━━━━━━━━
+{threat}
+
+📍 {location if location else "Харківська область"}
+
+🕒 {now}
+
+━━━━━━━━━━━━━━
+{original_text[:300]}
+"""
+
+    return message.strip()
 
 
-# ================== ПРИОРИТЕТ ==================
+# ==============================
+# TELETHON ЛОГИКА
+# ==============================
 
-def get_priority(threat: str) -> int:
-    return THREAT_PRIORITY.get(threat, 1)
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
-
-def should_send(priority: int) -> bool:
-    global last_priority_sent, last_priority_time
-
-    now = time.time()
-
-    # сброс приоритета через время
-    if now - last_priority_time > PRIORITY_RESET_TIME:
-        last_priority_sent = 0
-
-    if priority >= last_priority_sent:
-        last_priority_sent = priority
-        last_priority_time = now
-        return True
-
-    return False
+processed_ids = set()
 
 
-# ================== ФОРМИРОВАНИЕ СООБЩЕНИЯ ==================
-
-EMOJI = {
-    "rocket": "🚀",
-    "drone": "🛸",
-    "aviation": "✈️",
-    "explosion": "💥",
-    "other": "⚠️",
-}
-
-
-def build_message(threat: str, district: str | None, direction: str | None) -> str:
-    emoji = EMOJI.get(threat, "⚠️")
-    time_now = datetime.now().strftime("%H:%M")
-
-    msg = f"{emoji} *ЗАГРОЗА*\n"
-    msg += f"📍 Харків\n"
-    msg += f"🕒 {time_now}\n\n"
-
-    if district:
-        msg += f"🏙 Район: *{district}*\n"
-
-    if direction:
-        msg += f"🧭 Напрямок: *{direction}*\n"
-
-    msg += "\n➡️ *Перебувайте в укриттях*"
-
-    return msg
-
-
-# ================== TELEGRAM CLIENT ==================
-
-client = TelegramClient(SESSION, API_ID, API_HASH)
-
-
-@client.on(events.NewMessage(chats=CHANNELS))
+@client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
-    text = event.raw_text
+    try:
+        if event.id in processed_ids:
+            return
 
-    if not text:
-        return
+        text = event.raw_text
+        if not text:
+            return
 
-    if is_duplicate(text):
-        return
+        if not contains_target_region(text):
+            return
 
-    threat = detect_threat(text)
-    priority = get_priority(threat)
+        threat = detect_threat_type(text)
+        location = extract_location_line(text)
 
-    if not should_send(priority):
-        return
+        formatted = format_alert_message(threat, location, text)
 
-    district = detect_district(text)
-    direction = detect_direction(text)
+        send_message(formatted)
 
-    message = build_message(threat, district, direction)
+        processed_ids.add(event.id)
 
-    logging.info(f"SEND → {message.replace(chr(10), ' ')}")
+        logging.info(f"Sent alert: {threat}")
 
-    send_message(message)
+    except FloodWaitError as e:
+        logging.warning(f"Flood wait: {e.seconds}")
+        await asyncio.sleep(e.seconds)
 
+    except RPCError as e:
+        logging.error(f"Telegram RPC error: {e}")
 
-# ================== ЗАПУСК ==================
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+
 
 async def main():
-    await client.start()
-    logging.info("Parser started")
-    await client.run_until_disconnected()
+    while True:
+        try:
+            logging.info("Connecting to Telegram...")
+            await client.start()
+            logging.info("Parser connected")
+            await client.run_until_disconnected()
+
+        except Exception as e:
+            logging.error(f"Connection error: {e}")
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
