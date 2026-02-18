@@ -35,67 +35,15 @@ if not ALERTS_TOKEN:
     raise SystemExit("ALERTS_TOKEN не задан!")
 
 
-# ---------- Советы безопасности ----------
-ALERT_ADVICE = {
-    "air_raid": "Знайдіть найближче укриття.",
-    "artillery": "Уникайте відкритих місць.",
-    "rocket": "Негайно прямуйте в укриття.",
-    "drone": "Залишайтесь у приміщенні.",
-    "street_fighting": "Не виходьте на вулицю.",
-    "default": "Дотримуйтесь правил безпеки."
+# ---------- Типы угроз ----------
+ALERT_TYPES = {
+    "air_raid": ("🚨", "ПОВІТРЯНА ТРИВОГА"),
+    "rocket": ("🚀", "РАКЕТНА ЗАГРОЗА"),
+    "drone": ("🛸", "ЗАГРОЗА БПЛА"),
+    "artillery": ("💣", "АРТИЛЕРІЙСЬКА НЕБЕЗПЕКА"),
+    "street_fighting": ("🛡️", "ВУЛИЧНІ БОЇ"),
+    "default": ("⚠️", "НЕБЕЗПЕКА"),
 }
-
-# ---------- Дизайн уведомлений ----------
-ALERT_META = {
-    "air_raid":  {"emoji": "🚨", "title": "ПОВІТРЯНА ТРИВОГА"},
-    "rocket":    {"emoji": "🚀", "title": "РАКЕТНА НЕБЕЗПЕКА"},
-    "artillery": {"emoji": "💣", "title": "АРТИЛЕРІЙСЬКА ЗАГРОЗА"},
-    "drone":     {"emoji": "🛸", "title": "ЗАГРОЗА БПЛА"},
-    "street_fighting": {"emoji": "🛡️", "title": "ВУЛИЧНІ БОЇ"},
-    "default":   {"emoji": "⚠️", "title": "НЕБЕЗПЕКА"},
-}
-
-
-def format_alert_start(alert_type: str, start_time: datetime) -> str:
-    meta = ALERT_META.get(alert_type, ALERT_META["default"])
-    advice = ALERT_ADVICE.get(alert_type, ALERT_ADVICE["default"])
-
-    return (
-        f"{meta['emoji']} *{meta['title']}*\n"
-        f"📍 *Харківська область*\n"
-        f"🕒 Початок: *{start_time.strftime('%H:%M')}*\n\n"
-        f"_{advice}_"
-    )
-
-
-def format_alert_reminder(minutes: int) -> str:
-    return (
-        "⏰ *ТРИВОГА ТРИВАЄ*\n"
-        f"⏱ Вже: *{minutes} хв*\n\n"
-        "Перебувайте в укритті."
-    )
-
-
-def format_alert_end(duration: int | None) -> str:
-    msg = (
-        "✅ *ВІДБІЙ ПОВІТРЯНОЇ ТРИВОГИ*\n"
-        "📍 *Харківська область*"
-    )
-
-    if duration:
-        msg += f"\n⏱ Тривала: *{duration} хв*"
-
-    msg += "\n\nБудьте обережні."
-
-    return msg
-
-
-def format_daily_report(count: int) -> str:
-    return (
-        "📊 *СТАТИСТИКА ЗА ДОБУ*\n"
-        f"🔔 Тривог: *{count}*\n\n"
-        "Бережіть себе."
-    )
 
 
 # ---------- Telegram ----------
@@ -105,11 +53,11 @@ def send_message(text, retries=3):
 
     for _ in range(retries):
         try:
-            if requests.post(url, data=data, timeout=10).status_code == 200:
+            if requests.post(url, data=data, timeout=5).status_code == 200:
                 return True
         except Exception as e:
             logging.error(f"Telegram error: {e}")
-        time.sleep(5)
+        time.sleep(2)
     return False
 
 
@@ -119,7 +67,7 @@ def get_alerts():
         r = requests.get(
             "https://api.alerts.in.ua/v1/alerts/active.json",
             headers={"Authorization": f"Bearer {ALERTS_TOKEN}"},
-            timeout=10,
+            timeout=5,
         )
 
         if r.status_code != 200:
@@ -147,16 +95,66 @@ def api_alerts():
     return jsonify({"active": bool(get_alerts())})
 
 
-# ---------- Основная логика ----------
+# ---------- Состояние ----------
 last_status = None
 last_alert_start = None
 last_daily_report = datetime.now(timezone.utc).date()
-daily_alerts = []
 last_reminder_sent = None
 
+# статистика
+daily_alerts_count = 0
+daily_duration_total = 0
+daily_types = {k: 0 for k in ALERT_TYPES.keys()}
 
+
+# ---------- Формирование сообщений ----------
+def build_start_message(alert_type):
+    emoji, title = ALERT_TYPES.get(alert_type, ALERT_TYPES["default"])
+    time_now = datetime.now().strftime("%H:%M")
+
+    return (
+        f"{emoji} *{title}*\n"
+        f"📍 Харківська область\n"
+        f"🕒 {time_now}\n\n"
+        f"➡️ *Негайно прямуйте в укриття*"
+    )
+
+
+def build_end_message(duration_min):
+    time_now = datetime.now().strftime("%H:%M")
+
+    msg = "✅ *ВІДБІЙ ТРИВОГИ*\n"
+    msg += f"🕒 {time_now}"
+
+    if duration_min:
+        msg += f"\n⏱ Тривалість: {duration_min} хв"
+
+    return msg
+
+
+def build_daily_report():
+    if daily_alerts_count == 0:
+        return "📊 *За добу тривог не було*"
+
+    avg = int(daily_duration_total / daily_alerts_count) if daily_alerts_count else 0
+
+    report = "📊 *СТАТИСТИКА ЗА ДОБУ*\n\n"
+    report += f"🔔 Тривог: {daily_alerts_count}\n"
+    report += f"⏱ Середня тривалість: {avg} хв\n\n"
+
+    for t, count in daily_types.items():
+        if t == "default" or count == 0:
+            continue
+        emoji, title = ALERT_TYPES[t]
+        report += f"{emoji} {title.title()}: {count}\n"
+
+    return report
+
+
+# ---------- Основной цикл ----------
 def loop():
-    global last_status, last_alert_start, last_daily_report, daily_alerts, last_reminder_sent
+    global last_status, last_alert_start, last_daily_report, last_reminder_sent
+    global daily_alerts_count, daily_duration_total, daily_types
 
     while True:
         try:
@@ -172,39 +170,45 @@ def loop():
                 if current_status:
                     alert_type = alerts[0] if alerts else "air_raid"
 
-                    send_message(format_alert_start(alert_type, now))
+                    send_message(build_start_message(alert_type))
 
                     last_alert_start = now
-                    daily_alerts.append(now)
                     last_reminder_sent = now
+
+                    daily_alerts_count += 1
+                    daily_types[alert_type] = daily_types.get(alert_type, 0) + 1
+
                 else:
-                    duration = None
+                    duration = 0
                     if last_alert_start:
                         duration = int((now - last_alert_start).total_seconds() // 60)
+                        daily_duration_total += duration
 
-                    send_message(format_alert_end(duration))
+                    send_message(build_end_message(duration))
 
                 last_status = current_status
 
             # --- напоминание каждые 15 минут ---
-            if current_status and last_alert_start and last_reminder_sent:
+            if current_status and last_reminder_sent:
                 if (now - last_reminder_sent).total_seconds() >= 900:
-                    minutes = int((now - last_alert_start).total_seconds() // 60)
-                    send_message(format_alert_reminder(minutes))
+                    send_message("⏰ *ТРИВОГА ТРИВАЄ*\nБудьте в укритті.")
                     last_reminder_sent = now
 
             # --- суточная статистика ---
             today = (now + timedelta(hours=2)).date()
             if today != last_daily_report:
-                send_message(format_daily_report(len(daily_alerts)))
-                daily_alerts = []
+                send_message(build_daily_report())
+
+                daily_alerts_count = 0
+                daily_duration_total = 0
+                daily_types = {k: 0 for k in ALERT_TYPES.keys()}
                 last_daily_report = today
 
         except Exception as e:
             logging.error(f"Main loop error: {e}")
             time.sleep(10)
 
-        time.sleep(60)
+        time.sleep(3)  # быстрая проверка (безопасно для Railway)
 
 
 Thread(target=loop, daemon=True).start()
